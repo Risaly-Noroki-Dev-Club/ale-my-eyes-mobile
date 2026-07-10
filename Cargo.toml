@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "ale-core",
-    "ale-cli",
     "ale-gui",
 ]
 resolver = "2"

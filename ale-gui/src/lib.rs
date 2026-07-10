@@ -19,19 +19,10 @@ pub mod automation_ios;
 #[cfg(target_os = "ios")]
 pub mod tts_player_ios;
 
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub mod screen_capture;
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-pub mod automation;
-
 mod platform;
 mod remote_crypto;
 
 mod remote_client;
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-mod remote_server;
 
 use ale_core::actions::ActionPlan;
 use ale_core::config::AppConfig;

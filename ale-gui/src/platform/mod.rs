@@ -13,10 +13,9 @@ pub struct PlatformCapabilities {
     pub local_microphone: bool,
 }
 
-/// 平台抽象 trait。
-/// Desktop 负责屏幕捕获和执行；Android 目前只作为局域网指令入口骨架。
+/// 移动端平台抽象。
 pub trait PlatformService: Send + Sync {
-    /// 捕获当前屏幕画面，返回 JPEG 字节。Android 客户端暂不提供本机画面。
+    /// 捕获当前设备画面，返回 JPEG 字节。
     fn capture_image(&self) -> Option<Vec<u8>>;
 
     /// 执行自动化操作计划
@@ -30,10 +29,6 @@ pub trait PlatformService: Send + Sync {
 
 /// 为当前编译目标创建平台服务实例
 pub fn create_platform() -> Box<dyn PlatformService> {
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        Box::new(desktop::DesktopPlatform::new())
-    }
     #[cfg(target_os = "android")]
     {
         Box::new(android::AndroidPlatform::new())
@@ -43,9 +38,6 @@ pub fn create_platform() -> Box<dyn PlatformService> {
         Box::new(ios::IosPlatform::new())
     }
 }
-
-#[cfg(not(any(target_os = "android", target_os = "ios")))]
-mod desktop;
 
 #[cfg(target_os = "android")]
 mod android;
