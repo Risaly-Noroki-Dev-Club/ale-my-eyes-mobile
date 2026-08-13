@@ -14,7 +14,7 @@ pub fn play_audio(audio_data: &[u8]) -> Result<(), String> {
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn play_audio_desktop(audio_data: &[u8]) -> Result<(), String> {
     use std::io::Cursor;
 
@@ -40,7 +40,6 @@ fn play_audio_android(audio_data: &[u8]) -> Result<(), String> {
     let ctx = ndk_context::android_context();
     let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }
         .map_err(|error| format!("获取 JVM 失败: {error}"))?;
-    let activity = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
     let mut env = vm
         .attach_current_thread()
         .map_err(|error| format!("附加线程失败: {error}"))?;

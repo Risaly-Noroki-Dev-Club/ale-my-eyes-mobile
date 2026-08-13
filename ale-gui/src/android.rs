@@ -12,10 +12,19 @@ fn android_main(app: slint::android::AndroidApp) {
         return;
     }
 
-    // 1. 请求运行时权限（RECORD_AUDIO）
-    request_runtime_permissions();
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            tracing::error!("Failed to create Android runtime: {}", error);
+            return;
+        }
+    };
+    let _runtime_guard = runtime.enter();
 
-    // 2. 创建主窗口
+    // 1. 创建主窗口。权限只在用户触发对应功能时请求。
     let window = match AppWindow::new() {
         Ok(window) => window,
         Err(error) => {
@@ -24,10 +33,10 @@ fn android_main(app: slint::android::AndroidApp) {
         }
     };
 
-    // 3. 初始化应用逻辑（引擎、VAD、回调等）
+    // 2. 初始化 Android 遥控端逻辑。
     crate::setup_app(&window);
 
-    // 4. 运行事件循环（阻塞直到 Activity 销毁）
+    // 3. 运行事件循环（阻塞直到 Activity 销毁）
     if let Err(error) = window.run() {
         tracing::error!("Android app exited with error: {}", error);
     }
@@ -35,92 +44,54 @@ fn android_main(app: slint::android::AndroidApp) {
     tracing::info!("Android app shutdown complete");
 }
 
-// ── 权限管理 ──────────────────────────────────────────────────
+/// Returns true when the camera can be opened. If permission is missing, this
+/// requests it and lets the caller ask the user to tap Scan again afterwards.
+pub(crate) fn ensure_camera_permission() -> Result<bool, String> {
+    ensure_permission("android.permission.CAMERA", 1002)
+}
 
-/// 请求 Android 运行时权限（RECORD_AUDIO）
-fn request_runtime_permissions() {
+pub(crate) fn ensure_microphone_permission() -> Result<bool, String> {
+    ensure_permission("android.permission.RECORD_AUDIO", 1003)
+}
+
+fn ensure_permission(permission_name: &str, request_code: i32) -> Result<bool, String> {
     use jni::objects::JValue;
 
     let ctx = ndk_context::android_context();
-    let vm = match unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) } {
-        Ok(vm) => vm,
-        Err(e) => {
-            tracing::error!("Failed to get JavaVM for permissions: {}", e);
-            return;
-        }
-    };
-
-    let mut env = match vm.attach_current_thread() {
-        Ok(env) => env,
-        Err(e) => {
-            tracing::error!("Failed to attach thread for permissions: {}", e);
-            return;
-        }
-    };
-
+    let vm = unsafe { jni::JavaVM::from_raw(ctx.vm().cast()) }
+        .map_err(|error| format!("无法访问 Android 权限服务: {error}"))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|error| format!("无法检查权限: {error}"))?;
     let activity = unsafe { jni::objects::JObject::from_raw(ctx.context().cast()) };
-
-    let permissions = ["android.permission.RECORD_AUDIO"];
-
-    let mut to_request = Vec::new();
-
-    for perm in &permissions {
-        let jperm = match env.new_string(perm) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::error!("Failed to create permission string: {}", e);
-                continue;
-            }
-        };
-
-        let result = env.call_method(
+    let permission = env
+        .new_string(permission_name)
+        .map_err(|error| format!("无法创建权限请求: {error}"))?;
+    let granted = env
+        .call_method(
             &activity,
             "checkSelfPermission",
             "(Ljava/lang/String;)I",
-            &[JValue::Object(&jperm)],
-        );
-
-        match result {
-            Ok(val) => {
-                let granted = val.i().unwrap_or(-1);
-                if granted == 0 {
-                    tracing::info!("Permission already granted: {}", perm);
-                } else {
-                    tracing::info!("Permission not granted, queuing: {}", perm);
-                    to_request.push(perm);
-                }
-            }
-            Err(e) => {
-                tracing::warn!("checkSelfPermission failed for {}: {}", perm, e);
-            }
-        }
+            &[JValue::Object(&permission)],
+        )
+        .and_then(|value| value.i())
+        .map_err(|error| format!("无法检查权限: {error}"))?
+        == 0;
+    if granted {
+        return Ok(true);
     }
 
-    // 批量请求未授予的权限（一次系统对话框）
-    if !to_request.is_empty() {
-        let array_len = to_request.len() as i32;
-        let jarray =
-            env.new_object_array(array_len, "java/lang/String", jni::objects::JObject::null());
-
-        if let Ok(ref array) = jarray {
-            for (i, perm) in to_request.iter().enumerate() {
-                if let Ok(jperm) = env.new_string(perm) {
-                    let _ = env.set_object_array_element(array, i as i32, jperm);
-                }
-            }
-
-            match env.call_method(
-                &activity,
-                "requestPermissions",
-                "([Ljava/lang/String;I)V",
-                &[JValue::Object(array), JValue::Int(1001)],
-            ) {
-                Ok(_) => tracing::info!(
-                    "Batch permission request sent for {} permissions",
-                    array_len
-                ),
-                Err(e) => tracing::error!("requestPermissions failed: {}", e),
-            }
-        }
-    }
+    let array = env
+        .new_object_array(1, "java/lang/String", jni::objects::JObject::null())
+        .map_err(|error| format!("无法创建权限请求: {error}"))?;
+    env.set_object_array_element(&array, 0, permission)
+        .map_err(|error| format!("无法设置权限请求: {error}"))?;
+    env.call_method(
+        &activity,
+        "requestPermissions",
+        "([Ljava/lang/String;I)V",
+        &[JValue::Object(&array), JValue::Int(request_code)],
+    )
+    .map_err(|error| format!("无法请求权限: {error}"))?;
+    Ok(false)
 }

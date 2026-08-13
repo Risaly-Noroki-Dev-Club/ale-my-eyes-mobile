@@ -1,5 +1,9 @@
+#![cfg(any(target_os = "android", target_os = "ios"))]
+
 pub mod audio;
+#[cfg(target_os = "ios")]
 mod audit;
+#[cfg(target_os = "ios")]
 mod conversation;
 pub mod file_picker;
 pub mod tts_player;
@@ -20,20 +24,32 @@ pub mod automation_ios;
 pub mod tts_player_ios;
 
 mod platform;
+#[cfg(target_os = "android")]
 mod remote_crypto;
 
+#[cfg(target_os = "android")]
 mod remote_client;
 
+#[cfg(target_os = "android")]
+mod qr_scanner;
+
+#[cfg(target_os = "ios")]
 use ale_core::actions::ActionPlan;
+#[cfg(target_os = "ios")]
 use ale_core::config::AppConfig;
 #[cfg(target_os = "android")]
 use ale_core::remote::CommandInput;
+#[cfg(target_os = "ios")]
 use ale_core::vad::{VadConfig, VadState, VoiceActivityDetector};
+#[cfg(target_os = "ios")]
 use ale_core::{AleEngine, AleEngineFactory};
+#[cfg(target_os = "ios")]
 use conversation::handle_question_response;
+#[cfg(target_os = "ios")]
 use platform::PlatformService;
 use std::future::Future;
 use std::sync::Arc;
+#[cfg(target_os = "ios")]
 use std::time::Instant;
 use tokio::sync::Mutex;
 
@@ -43,16 +59,26 @@ use base64::Engine;
 slint::include_modules!();
 
 pub struct AppState {
+    #[cfg(target_os = "ios")]
     engine: Option<Arc<Mutex<AleEngine>>>,
     recorder: Option<audio::Recorder>,
+    #[cfg(target_os = "ios")]
     recording_started: Option<Instant>,
+    #[cfg(target_os = "ios")]
     vad_sample_offset: usize,
+    #[cfg(target_os = "ios")]
     auto_speak: bool,
+    #[cfg(target_os = "ios")]
     vad: VoiceActivityDetector,
+    #[cfg(target_os = "ios")]
     vad_active: bool,
+    #[cfg(target_os = "ios")]
     vad_frame_count: u64,
+    #[cfg(target_os = "ios")]
     listening_enabled: bool,
+    #[cfg(target_os = "ios")]
     platform: Option<Box<dyn PlatformService>>,
+    #[cfg(target_os = "ios")]
     pending_plan: Option<ActionPlan>,
     #[cfg(target_os = "android")]
     pending_remote_request_id: Option<String>,
@@ -69,16 +95,26 @@ impl Default for AppState {
 impl AppState {
     pub fn new() -> Self {
         Self {
+            #[cfg(target_os = "ios")]
             engine: None,
             recorder: None,
+            #[cfg(target_os = "ios")]
             recording_started: None,
+            #[cfg(target_os = "ios")]
             vad_sample_offset: 0,
+            #[cfg(target_os = "ios")]
             auto_speak: true,
+            #[cfg(target_os = "ios")]
             vad: VoiceActivityDetector::with_default_config(),
+            #[cfg(target_os = "ios")]
             vad_active: false,
+            #[cfg(target_os = "ios")]
             vad_frame_count: 0,
+            #[cfg(target_os = "ios")]
             listening_enabled: true,
+            #[cfg(target_os = "ios")]
             platform: None,
+            #[cfg(target_os = "ios")]
             pending_plan: None,
             #[cfg(target_os = "android")]
             pending_remote_request_id: None,
@@ -89,50 +125,20 @@ impl AppState {
 }
 
 pub fn setup_app(app: &AppWindow) {
-    // 在 Android 上启用移动端触控优化
     #[cfg(target_os = "android")]
-    app.set_is_mobile(true);
+    setup_android_app(app);
+    #[cfg(target_os = "ios")]
+    setup_local_app(app);
+}
 
+#[cfg(target_os = "ios")]
+fn setup_local_app(app: &AppWindow) {
     let state = Arc::new(Mutex::new(AppState::new()));
     let app_weak = app.as_weak();
-
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    {
-        let state = state.clone();
-        let app_weak = app_weak.clone();
-        spawn_local_task(async move {
-            loop {
-                let engine = { state.lock().await.engine.clone() };
-                if let Some(engine) = engine {
-                    let Some(app) = app_weak.upgrade() else {
-                        return;
-                    };
-                    match remote_server::start(engine).await {
-                        Ok(handle) => {
-                            app.set_remote_connected(true);
-                            app.set_remote_status(slint::format!(
-                                "桌面端监听中: {}",
-                                handle.pairing.websocket_url()
-                            ));
-                            app.set_remote_address(handle.pairing.websocket_url().into());
-                            app.set_remote_code(handle.pairing.code.clone().into());
-                            app.set_remote_pairing_info(slint::format!(
-                                "配对链接: {}\n\n{}",
-                                handle.pairing.uri(),
-                                handle.qr_text
-                            ));
-                        }
-                        Err(error) => {
-                            app.set_remote_status(slint::format!("桌面端服务启动失败: {}", error));
-                            app.set_remote_connected(false);
-                        }
-                    }
-                    return;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            }
-        });
-    }
+    #[cfg(target_os = "android")]
+    let qr_scan_cancel = Arc::new(std::sync::Mutex::new(
+        None::<Arc<std::sync::atomic::AtomicBool>>,
+    ));
 
     // Initialize engine + start monitoring
     {
@@ -261,8 +267,10 @@ pub fn setup_app(app: &AppWindow) {
                     }
 
                     // Speech ended — stop recording and process
+                    #[cfg(target_os = "ios")]
                     let engine = st.engine.clone();
                     let recorder = st.recorder.take();
+                    #[cfg(target_os = "ios")]
                     let auto_speak = st.auto_speak;
                     st.recording_started = None;
                     st.vad_active = false;
@@ -270,11 +278,15 @@ pub fn setup_app(app: &AppWindow) {
                     app.set_status_text("处理中...".into());
                     app.set_status_type("processing".into());
 
-                    let Some(engine) = engine else {
-                        app.set_status_text("引擎未初始化".into());
-                        app.set_status_type("error".into());
-                        app.set_is_busy(false);
-                        return;
+                    #[cfg(target_os = "ios")]
+                    let engine = match engine {
+                        Some(engine) => engine,
+                        None => {
+                            app.set_status_text("引擎未初始化".into());
+                            app.set_status_type("error".into());
+                            app.set_is_busy(false);
+                            return;
+                        }
                     };
                     let Some(recorder) = recorder else {
                         app.set_is_busy(false);
@@ -292,6 +304,7 @@ pub fn setup_app(app: &AppWindow) {
                     };
 
                     // Desktop captures the active screen; Android currently sends text-only input.
+                    #[cfg(target_os = "ios")]
                     let image_data: Option<Vec<u8>> =
                         st.platform.as_ref().and_then(|p| p.capture_image());
 
@@ -370,11 +383,17 @@ pub fn setup_app(app: &AppWindow) {
             let app_weak = app_weak.clone();
             spawn_local_task(async move {
                 let st = state.lock().await;
+                #[cfg(target_os = "ios")]
                 let engine = st.engine.clone();
+                #[cfg(target_os = "ios")]
                 let auto_speak = st.auto_speak;
                 drop(st);
 
-                let Some(engine) = engine else { return };
+                #[cfg(target_os = "ios")]
+                let Some(engine) = engine
+                else {
+                    return;
+                };
 
                 let Some(app) = app_weak.upgrade() else {
                     return;
@@ -385,6 +404,7 @@ pub fn setup_app(app: &AppWindow) {
                 app.set_status_type("processing".into());
 
                 // Get screen image
+                #[cfg(target_os = "ios")]
                 let image_data = {
                     let st = state.lock().await;
                     st.platform.as_ref().and_then(|p| p.capture_image())
@@ -524,10 +544,31 @@ pub fn setup_app(app: &AppWindow) {
         let app_weak = app_weak.clone();
         app.on_cancel_action(move || {
             let state = state.clone();
+            let app_weak = app_weak.clone();
             let Some(app) = app_weak.upgrade() else {
                 return;
             };
             spawn_local_task(async move {
+                #[cfg(target_os = "android")]
+                {
+                    let (client, request_id) = {
+                        let mut st = state.lock().await;
+                        (
+                            st.remote_client.clone(),
+                            st.pending_remote_request_id.take(),
+                        )
+                    };
+                    if let (Some(client), Some(request_id)) = (client, request_id) {
+                        if let Err(error) = client.confirm(request_id, false).await {
+                            let Some(app) = app_weak.upgrade() else {
+                                return;
+                            };
+                            app.set_status_text(slint::format!("远程取消失败: {}", error));
+                            app.set_status_type("error".into());
+                        }
+                    }
+                }
+                #[cfg(target_os = "ios")]
                 if let Some(plan) = state.lock().await.pending_plan.take() {
                     audit::record("cancelled", "local", &plan, None);
                 }
@@ -590,11 +631,19 @@ pub fn setup_app(app: &AppWindow) {
 
     // Close settings
     {
+        #[cfg(target_os = "android")]
+        let qr_scan_cancel = qr_scan_cancel.clone();
         let app_weak = app_weak.clone();
         app.on_close_settings(move || {
             let Some(app) = app_weak.upgrade() else {
                 return;
             };
+            #[cfg(target_os = "android")]
+            if let Ok(mut slot) = qr_scan_cancel.lock() {
+                if let Some(cancel) = slot.take() {
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
             app.set_show_settings(false);
         });
     }
@@ -669,104 +718,135 @@ pub fn setup_app(app: &AppWindow) {
         });
     }
     {
-        let app_weak = app_weak.clone();
-        app.on_remote_address_changed(move |text| {
-            let Some(app) = app_weak.upgrade() else {
-                return;
-            };
-            app.set_remote_address(text);
-        });
-    }
-    {
-        let app_weak = app_weak.clone();
-        app.on_remote_code_changed(move |text| {
-            let Some(app) = app_weak.upgrade() else {
-                return;
-            };
-            app.set_remote_code(text);
-        });
-    }
-    {
         #[cfg(target_os = "android")]
         let state = state.clone();
+        #[cfg(target_os = "android")]
+        let qr_scan_cancel = qr_scan_cancel.clone();
+        #[cfg(target_os = "android")]
         let app_weak = app_weak.clone();
-        app.on_connect_remote(move || {
+        app.on_scan_remote(move || {
             #[cfg(target_os = "android")]
-            let state = state.clone();
-            let app_weak = app_weak.clone();
-            spawn_local_task(async move {
+            {
                 let Some(app) = app_weak.upgrade() else {
                     return;
                 };
-                app.set_is_busy(true);
-                #[cfg(target_os = "android")]
-                {
-                    let mut code = app.get_remote_code().to_string();
-                    let address = app.get_remote_address().to_string();
-                    let url = if address.trim().is_empty() {
-                        match remote_client::discover_first(code.clone()) {
-                            Some(info) => {
-                                app.set_remote_address(info.websocket_url().into());
-                                app.set_remote_pairing_info(info.uri().into());
-                                info.websocket_url()
-                            }
-                            None => {
-                                app.set_remote_status(
-                                    "未自动发现桌面端，请手动输入地址或粘贴二维码链接".into(),
-                                );
-                                app.set_remote_connected(false);
-                                app.set_is_busy(false);
-                                return;
-                            }
-                        }
-                    } else if address.starts_with("ale-my-eyes://") {
-                        match ale_core::remote::PairingInfo::from_uri(&address) {
-                            Ok(info) => {
-                                code = info.code.clone();
-                                app.set_remote_code(code.clone().into());
-                                info.websocket_url()
-                            }
-                            Err(error) => {
-                                app.set_remote_status(slint::format!("配对链接无效: {}", error));
-                                app.set_remote_connected(false);
-                                app.set_is_busy(false);
-                                return;
-                            }
-                        }
-                    } else {
-                        address
-                    };
-
-                    let client = remote_client::RemoteClient::new(url.clone(), code);
-                    match client.test().await {
-                        Ok(name) => {
-                            state.lock().await.remote_client = Some(client);
-                            app.set_remote_address(url.into());
-                            app.set_remote_status(slint::format!("已加密连接: {}", name));
-                            app.set_remote_connected(true);
-                        }
-                        Err(error) => {
-                            app.set_remote_status(slint::format!("连接失败: {}", error));
-                            app.set_remote_connected(false);
-                        }
+                match android::ensure_camera_permission() {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        app.set_remote_status("请允许相机权限，然后再次点击扫描二维码".into());
+                        return;
+                    }
+                    Err(error) => {
+                        app.set_remote_status(slint::format!("相机权限错误: {}", error));
+                        return;
                     }
                 }
-                #[cfg(not(target_os = "android"))]
-                {
-                    app.set_remote_status("桌面端已经在本机监听，无需连接自己".into());
-                    app.set_remote_connected(true);
+                app.set_is_busy(true);
+                app.set_remote_connected(false);
+                app.set_remote_scanning(true);
+                app.set_remote_status("正在扫描桌面端二维码...".into());
+
+                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                if let Ok(mut slot) = qr_scan_cancel.lock() {
+                    if let Some(previous) = slot.replace(cancelled.clone()) {
+                        previous.store(true, std::sync::atomic::Ordering::Release);
+                    }
                 }
-                app.set_is_busy(false);
-            });
+                let state = state.clone();
+                let app_weak = app_weak.clone();
+                let qr_scan_cancel = qr_scan_cancel.clone();
+                std::thread::spawn(move || {
+                    let preview_app = app_weak.clone();
+                    let scan_token = cancelled.clone();
+                    let scan_result =
+                        qr_scanner::scan_pairing_info(cancelled, move |gray, width, height| {
+                            let _ = preview_app.upgrade_in_event_loop(move |app| {
+                                let mut pixels = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(
+                                    width as u32,
+                                    height as u32,
+                                );
+                                for (pixel, value) in pixels.make_mut_slice().iter_mut().zip(gray) {
+                                    *pixel = slint::Rgb8Pixel::new(value, value, value);
+                                }
+                                app.set_remote_scan_preview(slint::Image::from_rgb8(pixels));
+                            });
+                        });
+                    if let Ok(mut slot) = qr_scan_cancel.lock() {
+                        if slot
+                            .as_ref()
+                            .is_some_and(|current| Arc::ptr_eq(current, &scan_token))
+                        {
+                            slot.take();
+                        }
+                    }
+                    let _ = app_weak.upgrade_in_event_loop(move |app| match scan_result {
+                        Ok(pairing) => {
+                            app.set_remote_scanning(false);
+                            app.set_remote_status("二维码有效，正在建立加密连接...".into());
+                            let client = remote_client::RemoteClient::from_pairing(&pairing);
+                            let state = state.clone();
+                            spawn_local_task(async move {
+                                match client.test().await {
+                                    Ok(name) => {
+                                        state.lock().await.remote_client = Some(client);
+                                        app.set_remote_status(slint::format!(
+                                            "已加密连接: {}",
+                                            name
+                                        ));
+                                        app.set_remote_connected(true);
+                                    }
+                                    Err(error) => {
+                                        app.set_remote_status(slint::format!(
+                                            "连接失败: {}",
+                                            error
+                                        ));
+                                        app.set_remote_connected(false);
+                                    }
+                                }
+                                app.set_is_busy(false);
+                            });
+                        }
+                        Err(error) => {
+                            app.set_remote_scanning(false);
+                            app.set_remote_status(slint::format!("扫描失败: {}", error));
+                            app.set_remote_connected(false);
+                            app.set_is_busy(false);
+                        }
+                    });
+                });
+            }
+        });
+    }
+    {
+        #[cfg(target_os = "android")]
+        let qr_scan_cancel = qr_scan_cancel.clone();
+        #[cfg(target_os = "android")]
+        let app_weak = app_weak.clone();
+        app.on_cancel_remote_scan(move || {
+            #[cfg(target_os = "android")]
+            {
+                if let Ok(mut slot) = qr_scan_cancel.lock() {
+                    if let Some(cancel) = slot.take() {
+                        cancel.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_remote_status("正在停止扫描...".into());
+                }
+            }
         });
     }
     {
         #[cfg(target_os = "android")]
         let state = state.clone();
+        #[cfg(target_os = "android")]
+        let qr_scan_cancel = qr_scan_cancel.clone();
         let app_weak = app_weak.clone();
         app.on_disconnect_remote(move || {
             #[cfg(target_os = "android")]
             let state = state.clone();
+            #[cfg(target_os = "android")]
+            let qr_scan_cancel = qr_scan_cancel.clone();
             let app_weak = app_weak.clone();
             spawn_local_task(async move {
                 #[cfg(target_os = "android")]
@@ -775,10 +855,17 @@ pub fn setup_app(app: &AppWindow) {
                     st.remote_client = None;
                     st.pending_remote_request_id = None;
                 }
+                #[cfg(target_os = "android")]
+                if let Ok(mut slot) = qr_scan_cancel.lock() {
+                    if let Some(cancel) = slot.take() {
+                        cancel.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
                 let Some(app) = app_weak.upgrade() else {
                     return;
                 };
                 app.set_remote_connected(false);
+                app.set_remote_scanning(false);
                 app.set_remote_status("未连接桌面端".into());
             });
         });
@@ -906,12 +993,282 @@ pub fn setup_app(app: &AppWindow) {
     }
 }
 
+#[cfg(target_os = "android")]
+fn setup_android_app(app: &AppWindow) {
+    app.set_remote_status("扫描桌面端二维码以开始".into());
+
+    let state = Arc::new(Mutex::new(AppState::new()));
+    let qr_scan_cancel = Arc::new(std::sync::Mutex::new(
+        None::<Arc<std::sync::atomic::AtomicBool>>,
+    ));
+
+    {
+        let state = state.clone();
+        let qr_scan_cancel = qr_scan_cancel.clone();
+        let app_weak = app.as_weak();
+        app.on_scan_remote(move || {
+            let Some(app) = app_weak.upgrade() else {
+                return;
+            };
+            match android::ensure_camera_permission() {
+                Ok(true) => {}
+                Ok(false) => {
+                    app.set_remote_status("允许相机权限后，再点一次扫描".into());
+                    return;
+                }
+                Err(error) => {
+                    app.set_remote_status(slint::format!("相机权限错误: {}", error));
+                    return;
+                }
+            }
+
+            app.set_is_busy(true);
+            app.set_remote_connected(false);
+            app.set_remote_scanning(true);
+            app.set_remote_status("将电脑上的二维码放入框内".into());
+            let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            if let Ok(mut slot) = qr_scan_cancel.lock() {
+                if let Some(previous) = slot.replace(cancelled.clone()) {
+                    previous.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            let qr_scan_cancel = qr_scan_cancel.clone();
+            std::thread::spawn(move || {
+                let preview_app = app_weak.clone();
+                let scan_token = cancelled.clone();
+                let scan_result =
+                    qr_scanner::scan_pairing_info(cancelled, move |gray, width, height| {
+                        let _ = preview_app.upgrade_in_event_loop(move |app| {
+                            let mut pixels = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(
+                                width as u32,
+                                height as u32,
+                            );
+                            for (pixel, value) in pixels.make_mut_slice().iter_mut().zip(gray) {
+                                *pixel = slint::Rgb8Pixel::new(value, value, value);
+                            }
+                            app.set_remote_scan_preview(slint::Image::from_rgb8(pixels));
+                        });
+                    });
+                if let Ok(mut slot) = qr_scan_cancel.lock() {
+                    if slot
+                        .as_ref()
+                        .is_some_and(|current| Arc::ptr_eq(current, &scan_token))
+                    {
+                        slot.take();
+                    }
+                }
+                let _ = app_weak.upgrade_in_event_loop(move |app| match scan_result {
+                    Ok(pairing) => {
+                        app.set_remote_scanning(false);
+                        app.set_remote_status("二维码有效，正在建立加密连接".into());
+                        let client = remote_client::RemoteClient::from_pairing(&pairing);
+                        let state = state.clone();
+                        spawn_local_task(async move {
+                            match client.test().await {
+                                Ok(name) => {
+                                    state.lock().await.remote_client = Some(client);
+                                    app.set_remote_status(slint::format!("已连接: {}", name));
+                                    app.set_remote_connected(true);
+                                }
+                                Err(error) => {
+                                    app.set_remote_status(slint::format!("连接失败: {}", error));
+                                    app.set_remote_connected(false);
+                                }
+                            }
+                            app.set_is_busy(false);
+                        });
+                    }
+                    Err(error) => {
+                        app.set_remote_scanning(false);
+                        app.set_remote_status(slint::format!("扫描失败: {}", error));
+                        app.set_is_busy(false);
+                    }
+                });
+            });
+        });
+    }
+
+    {
+        let qr_scan_cancel = qr_scan_cancel.clone();
+        let app_weak = app.as_weak();
+        app.on_cancel_remote_scan(move || {
+            if let Ok(mut slot) = qr_scan_cancel.lock() {
+                if let Some(cancel) = slot.take() {
+                    cancel.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
+            if let Some(app) = app_weak.upgrade() {
+                app.set_remote_scanning(false);
+                app.set_is_busy(false);
+                app.set_remote_status("扫描已取消".into());
+            }
+        });
+    }
+
+    {
+        let state = state.clone();
+        let app_weak = app.as_weak();
+        app.on_toggle_listening(move || {
+            let state = state.clone();
+            let app_weak = app_weak.clone();
+            spawn_local_task(async move {
+                let Some(app) = app_weak.upgrade() else {
+                    return;
+                };
+                if !app.get_remote_connected() || app.get_is_busy() {
+                    return;
+                }
+
+                let mut st = state.lock().await;
+                if st.recorder.is_none() {
+                    match android::ensure_microphone_permission() {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            app.set_remote_status("允许麦克风权限后，再点一次说话".into());
+                            return;
+                        }
+                        Err(error) => {
+                            app.set_remote_status(slint::format!("麦克风权限错误: {}", error));
+                            return;
+                        }
+                    }
+                    match audio::Recorder::start() {
+                        Ok(recorder) => {
+                            st.recorder = Some(recorder);
+                            app.set_voice_recording(true);
+                            app.set_remote_status("正在录音，再点一次即可发送".into());
+                        }
+                        Err(error) => {
+                            app.set_remote_status(slint::format!("无法开始录音: {}", error));
+                        }
+                    }
+                    return;
+                }
+
+                let recorder = st.recorder.take();
+                drop(st);
+                app.set_voice_recording(false);
+                app.set_is_busy(true);
+                app.set_remote_status("正在发送语音".into());
+                let Some(recorder) = recorder else {
+                    app.set_is_busy(false);
+                    return;
+                };
+                match recorder.into_wav_bytes() {
+                    Ok(audio) => {
+                        let wav_base64 = base64::engine::general_purpose::STANDARD.encode(audio);
+                        handle_remote_command(&state, &app, CommandInput::AudioWav { wav_base64 })
+                            .await;
+                    }
+                    Err(error) => {
+                        app.set_ai_response(slint::format!("录音失败: {}", error));
+                        app.set_remote_status("录音失败，请重试".into());
+                    }
+                }
+                app.set_is_busy(false);
+            });
+        });
+    }
+
+    {
+        let state = state.clone();
+        let qr_scan_cancel = qr_scan_cancel.clone();
+        let app_weak = app.as_weak();
+        app.on_disconnect_remote(move || {
+            let state = state.clone();
+            let qr_scan_cancel = qr_scan_cancel.clone();
+            let app_weak = app_weak.clone();
+            spawn_local_task(async move {
+                if let Ok(mut slot) = qr_scan_cancel.lock() {
+                    if let Some(cancel) = slot.take() {
+                        cancel.store(true, std::sync::atomic::Ordering::Release);
+                    }
+                }
+                let mut st = state.lock().await;
+                st.remote_client = None;
+                st.pending_remote_request_id = None;
+                st.recorder = None;
+                drop(st);
+                if let Some(app) = app_weak.upgrade() {
+                    app.set_remote_connected(false);
+                    app.set_remote_scanning(false);
+                    app.set_voice_recording(false);
+                    app.set_show_confirmation(false);
+                    app.set_ai_response("".into());
+                    app.set_action_steps("".into());
+                    app.set_remote_status("扫描桌面端二维码以重新连接".into());
+                }
+            });
+        });
+    }
+
+    {
+        let state = state.clone();
+        let app_weak = app.as_weak();
+        app.on_confirm_action(move || {
+            finish_remote_confirmation(state.clone(), app_weak.clone(), true);
+        });
+    }
+
+    {
+        let state = state.clone();
+        let app_weak = app.as_weak();
+        app.on_cancel_action(move || {
+            finish_remote_confirmation(state.clone(), app_weak.clone(), false);
+        });
+    }
+}
+
+#[cfg(target_os = "android")]
+fn finish_remote_confirmation(
+    state: Arc<Mutex<AppState>>,
+    app_weak: slint::Weak<AppWindow>,
+    approved: bool,
+) {
+    spawn_local_task(async move {
+        let (client, request_id) = {
+            let mut st = state.lock().await;
+            (
+                st.remote_client.clone(),
+                st.pending_remote_request_id.take(),
+            )
+        };
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        app.set_is_busy(true);
+        match (client, request_id) {
+            (Some(client), Some(request_id)) => match client.confirm(request_id, approved).await {
+                Ok(status) => {
+                    app.set_ai_response(status.message.into());
+                    app.set_remote_status(if approved {
+                        "桌面端执行完成".into()
+                    } else {
+                        "操作已取消".into()
+                    });
+                }
+                Err(error) => {
+                    app.set_ai_response(slint::format!("远程操作失败: {}", error));
+                    app.set_remote_status("远程操作失败".into());
+                }
+            },
+            _ => app.set_remote_status("没有待确认的操作".into()),
+        }
+        app.set_show_confirmation(false);
+        app.set_is_busy(false);
+    });
+}
+
 fn spawn_local_task(future: impl Future<Output = ()> + 'static) {
     if let Err(error) = slint::spawn_local(future) {
         tracing::warn!("Failed to spawn UI task: {}", error);
     }
 }
 
+#[cfg(target_os = "ios")]
 fn start_continuous_listening(st: &mut AppState, app: &AppWindow) {
     if !st.listening_enabled || st.recorder.is_some() {
         return;
@@ -936,6 +1293,7 @@ fn start_continuous_listening(st: &mut AppState, app: &AppWindow) {
     }
 }
 
+#[cfg(target_os = "ios")]
 fn apply_config_to_app(app: &AppWindow, config: &AppConfig) {
     app.set_provider(config.cloud_api.provider.clone().into());
     app.set_api_key(config.cloud_api.api_key.clone().into());
@@ -949,9 +1307,8 @@ fn apply_config_to_app(app: &AppWindow, config: &AppConfig) {
 async fn handle_remote_command(state: &Arc<Mutex<AppState>>, app: &AppWindow, input: CommandInput) {
     let client = { state.lock().await.remote_client.clone() };
     let Some(client) = client else {
-        app.set_ai_response("请先在设置中连接桌面端".into());
-        app.set_status_text("未连接桌面端".into());
-        app.set_status_type("error".into());
+        app.set_ai_response("请先扫描桌面端二维码".into());
+        app.set_remote_status("未连接桌面端".into());
         return;
     };
 
@@ -966,17 +1323,16 @@ async fn handle_remote_command(state: &Arc<Mutex<AppState>>, app: &AppWindow, in
             } else {
                 app.set_show_confirmation(false);
             }
-            app.set_status_text("桌面端已返回计划".into());
-            app.set_status_type("ready".into());
+            app.set_remote_status("桌面端已返回结果".into());
         }
         Err(error) => {
             app.set_ai_response(slint::format!("远程请求失败: {}", error));
-            app.set_status_text("远程请求失败".into());
-            app.set_status_type("error".into());
+            app.set_remote_status("远程请求失败，请检查两端网络".into());
         }
     }
 }
 
+#[cfg(target_os = "ios")]
 fn config_from_app(app: &AppWindow, base: &AppConfig) -> AppConfig {
     let mut config = base.clone();
     config.cloud_api.provider = app.get_provider().to_string();
@@ -994,6 +1350,7 @@ fn config_from_app(app: &AppWindow, base: &AppConfig) -> AppConfig {
     config
 }
 
+#[cfg(target_os = "ios")]
 async fn create_engine() -> Result<(Arc<Mutex<AleEngine>>, AppConfig), String> {
     let engine = AleEngineFactory::create_default()
         .await
@@ -1002,6 +1359,7 @@ async fn create_engine() -> Result<(Arc<Mutex<AleEngine>>, AppConfig), String> {
     Ok((Arc::new(Mutex::new(engine)), config))
 }
 
+#[cfg(target_os = "ios")]
 async fn save_settings(
     engine: Arc<Mutex<AleEngine>>,
     config: AppConfig,
@@ -1015,6 +1373,7 @@ async fn save_settings(
     create_engine().await
 }
 
+#[cfg(target_os = "ios")]
 async fn test_connection(engine: Arc<Mutex<AleEngine>>) -> Result<bool, String> {
     let engine = engine.lock().await;
     ensure_api_key(engine.config())?;
@@ -1024,6 +1383,7 @@ async fn test_connection(engine: Arc<Mutex<AleEngine>>) -> Result<bool, String> 
         .map_err(|error| error.to_string())
 }
 
+#[cfg(target_os = "ios")]
 fn ensure_api_key(config: &AppConfig) -> Result<(), String> {
     if config.cloud_api.api_key.trim().is_empty() {
         return Err("API key 未配置".to_string());

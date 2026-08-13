@@ -56,7 +56,7 @@
 - **自适应推理**：根据设备性能和网络状态自动选择本地/云端推理
 - **长期记忆**：自动从对话中提取用户偏好并持久化
 
-**支持平台：** Windows、Linux（X11/Wayland）、Android（arm64/armv7）
+**当前移动端构建目标：** Android arm64；iOS 代码仍在开发中，尚未纳入 CI 验证。
 
 ---
 
@@ -1343,29 +1343,19 @@ cargo run -p ale-cli -- status
 ```
 check (ubuntu-latest)
 ├── cargo fmt --all -- --check
-├── cargo check --workspace
-│
-├──→ build-windows (windows-latest)
-│    └── cargo build --release -p ale-gui
-│
-├──→ build-linux (ubuntu-latest)
-│    └── cargo build --release -p ale-cli -p ale-gui → .deb 包
-│
-├──→ build-android (ubuntu-latest)
-│    └── ./scripts/package-android.sh → .apk (arm64 + armv7)
-│
-└──→ release (ubuntu-latest)
-     └── softprops/action-gh-release → GitHub Release
+├── cargo test -p ale-core
+└── cargo check -p ale-gui --target aarch64-linux-android --lib
+    │
+    └──→ build-android (tag/manual)
+         ├── ./scripts/package-android.sh → arm64 APK
+         └── release → GitHub Release
 ```
 
 ### 11.2 发布产物
 
 | 平台 | 文件名 | 说明 |
 |------|--------|------|
-| Windows | `ale-my-eyes-windows.exe` | 可执行文件 |
-| Linux | `ale-my-eyes_0.1.0_amd64.deb` | Debian 包 |
 | Android arm64 | `ale-my-eyes-arm64.apk` | APK |
-| Android armv7 | `ale-my-eyes-armv7.apk` | APK |
 
 ---
 

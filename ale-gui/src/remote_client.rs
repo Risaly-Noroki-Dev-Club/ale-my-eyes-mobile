@@ -1,23 +1,30 @@
-#![cfg_attr(not(target_os = "android"), allow(dead_code))]
+#![cfg(target_os = "android")]
 
 use crate::remote_crypto;
 use ale_core::remote::{
     ClientHello, CommandInput, CommandPreview, CommandRequest, ConfirmExecution, ExecutionStatus,
-    RemoteError, RemoteMessage, REMOTE_PROTOCOL_VERSION,
+    PairingInfo, RemoteError, RemoteMessage, REMOTE_PROTOCOL_VERSION,
 };
 use futures_util::{SinkExt, StreamExt};
 use std::time::Duration;
 use tokio_tungstenite::tungstenite::Message;
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+
 #[derive(Clone)]
 pub struct RemoteClient {
     url: String,
     code: String,
+    session_id: String,
 }
 
 impl RemoteClient {
-    pub fn new(url: String, code: String) -> Self {
-        Self { url, code }
+    pub fn from_pairing(pairing: &PairingInfo) -> Self {
+        Self {
+            url: pairing.websocket_url(),
+            code: pairing.code.clone(),
+            session_id: pairing.session_id.clone(),
+        }
     }
 
     pub async fn test(&self) -> Result<String, String> {
@@ -82,26 +89,36 @@ impl RemoteClient {
         ),
         String,
     > {
-        let (mut socket, _) = tokio_tungstenite::connect_async(&self.url)
-            .await
-            .map_err(|error| error.to_string())?;
+        let (mut socket, _) =
+            tokio::time::timeout(CONNECT_TIMEOUT, tokio_tungstenite::connect_async(&self.url))
+                .await
+                .map_err(|_| "连接桌面端超时".to_string())?
+                .map_err(|error| error.to_string())?;
         let (noise, client_handshake) = remote_crypto::client_handshake_message(&self.code)?;
         socket
             .send(Message::Binary(client_handshake))
             .await
             .map_err(|error| error.to_string())?;
-        let server_handshake = socket
-            .next()
+        let server_handshake = tokio::time::timeout(CONNECT_TIMEOUT, socket.next())
             .await
+            .map_err(|_| "桌面端握手超时".to_string())?
             .ok_or_else(|| "missing server handshake".to_string())?
             .map_err(|error| error.to_string())?
             .into_data();
         let mut secure = remote_crypto::client_finish_handshake(noise, &server_handshake)?;
 
-        let hello = read_secure(&mut socket, &mut secure).await?;
+        let hello = tokio::time::timeout(CONNECT_TIMEOUT, read_secure(&mut socket, &mut secure))
+            .await
+            .map_err(|_| "桌面端握手超时".to_string())??;
         let server_name = match hello {
-            RemoteMessage::ServerHello(hello) => hello.device_name,
-            _ => "Desktop".to_string(),
+            RemoteMessage::ServerHello(hello)
+                if hello.protocol_version == REMOTE_PROTOCOL_VERSION
+                    && hello.session_id == self.session_id =>
+            {
+                hello.device_name
+            }
+            RemoteMessage::ServerHello(_) => return Err("二维码与当前桌面会话不匹配".to_string()),
+            _ => return Err("桌面端握手响应无效".to_string()),
         };
 
         send_secure(
@@ -116,36 +133,6 @@ impl RemoteClient {
 
         Ok(((socket, secure), server_name))
     }
-}
-
-pub fn discover_first(code: String) -> Option<ale_core::remote::PairingInfo> {
-    let daemon = mdns_sd::ServiceDaemon::new().ok()?;
-    let receiver = daemon.browse("_ale-my-eyes._tcp.local.").ok()?;
-    let deadline = std::time::Instant::now() + Duration::from_secs(2);
-    while std::time::Instant::now() < deadline {
-        let Ok(event) = receiver.recv_timeout(Duration::from_millis(250)) else {
-            continue;
-        };
-        if let mdns_sd::ServiceEvent::ServiceResolved(info) = event {
-            let host = info.get_addresses().iter().next()?.to_string();
-            let name = info
-                .get_property_val_str("name")
-                .map(str::to_string)
-                .unwrap_or_else(|| info.get_fullname().to_string());
-            let session_id = info
-                .get_property_val_str("sid")
-                .map(str::to_string)
-                .unwrap_or_else(ale_core::remote::new_request_id);
-            return Some(ale_core::remote::PairingInfo {
-                host,
-                port: info.get_port(),
-                session_id,
-                code,
-                name,
-            });
-        }
-    }
-    None
 }
 
 async fn send_secure<S>(

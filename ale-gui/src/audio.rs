@@ -4,11 +4,16 @@ use std::sync::{Arc, Mutex as StdMutex};
 const MAX_BUFFERED_SAMPLES: usize = 2_880_000; // 60 seconds at 48 kHz mono
 
 #[cfg(target_os = "android")]
-use oboe::{AudioInputCallback, AudioInputStreamSafe, AudioStream, DataCallbackResult, Mono};
+use oboe::{
+    AudioInputCallback, AudioInputStreamSafe, AudioStream, AudioStreamAsync, DataCallbackResult,
+    Input, Mono,
+};
 
 pub struct Recorder {
     #[cfg(not(target_os = "android"))]
     stream: cpal::Stream,
+    #[cfg(target_os = "android")]
+    stream: AudioStreamAsync<Input, RecorderCallback>,
     samples: Arc<StdMutex<Vec<f32>>>,
     sample_rate: u32,
     channels: u16,
@@ -27,6 +32,9 @@ impl Recorder {
     }
 
     pub fn into_wav_bytes(self) -> Result<Vec<u8>, String> {
+        #[cfg(target_os = "android")]
+        drop(self.stream);
+
         let samples = self
             .samples
             .lock()
@@ -38,9 +46,7 @@ impl Recorder {
         }
 
         #[cfg(not(target_os = "android"))]
-        {
-            drop(self.stream);
-        }
+        drop(self.stream);
 
         let spec = hound::WavSpec {
             channels: self.channels,
@@ -146,11 +152,8 @@ impl Recorder {
             .start()
             .map_err(|error| format!("启动录音失败: {error:?}"))?;
 
-        // Leak the stream so it keeps running until stop
-        let stream_ref = Box::new(stream);
-        std::mem::forget(stream_ref);
-
         Ok(Self {
+            stream,
             samples,
             sample_rate: 48000,
             channels: 1,
@@ -216,22 +219,26 @@ fn trim_buffer(buffer: &mut Vec<f32>) {
     }
 }
 
+#[cfg(not(target_os = "android"))]
 trait FromSample<T> {
     fn from_sample(sample: T) -> f32;
 }
 
+#[cfg(not(target_os = "android"))]
 impl FromSample<f32> for f32 {
     fn from_sample(sample: f32) -> f32 {
         sample
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl FromSample<i16> for f32 {
     fn from_sample(sample: i16) -> f32 {
         sample as f32 / i16::MAX as f32
     }
 }
 
+#[cfg(not(target_os = "android"))]
 impl FromSample<u16> for f32 {
     fn from_sample(sample: u16) -> f32 {
         (sample as f32 / u16::MAX as f32) * 2.0 - 1.0

@@ -138,9 +138,13 @@ async fn pick_image_ios() -> Result<(Vec<u8>, String), String> {
 
         // 注意：需要设置 delegate 来接收选择结果
         // 这里简化处理，返回错误提示用户手动选择
-        let _: () = msg_send![root_vc, presentViewController: picker animated:true completion: {
-            // 完成回调
-        }];
+        let completion: Option<&block2::Block<dyn Fn()>> = None;
+        let _: () = msg_send![
+            root_vc,
+            presentViewController: picker,
+            animated: true,
+            completion: completion
+        ];
 
         tracing::info!("iOS image picker presented");
     }

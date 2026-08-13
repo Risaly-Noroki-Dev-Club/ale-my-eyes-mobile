@@ -1,0 +1,242 @@
+import { Button, Palette } from "std-widgets.slint";
+
+export component RemoteVoiceScreen inherits Rectangle {
+    in property <string> remote-status: "尚未连接";
+    in property <bool> remote-connected: false;
+    in property <image> scan-preview;
+    in property <bool> scanning: false;
+    in property <bool> recording: false;
+    in property <bool> busy: false;
+    in property <string> response-text: "";
+    in property <string> action-steps: "";
+    in property <bool> show-confirmation: false;
+    in property <string> confirmation-text: "";
+
+    callback scan();
+    callback cancel-scan();
+    callback toggle-recording();
+    callback disconnect();
+    callback confirm-action();
+    callback cancel-action();
+
+    background: #f7f8fa;
+
+    VerticalLayout {
+        padding: 18px;
+        spacing: 14px;
+
+        HorizontalLayout {
+            height: 48px;
+            alignment: space-between;
+
+            VerticalLayout {
+                spacing: 1px;
+                Text {
+                    text: "ALE, MY EYES";
+                    font-size: 18px;
+                    font-weight: 700;
+                    color: #17191c;
+                }
+                Text {
+                    text: root.remote-status;
+                    font-size: 12px;
+                    color: root.remote-connected ? #16734a : #626971;
+                    overflow: elide;
+                }
+            }
+
+            if root.remote-connected : Button {
+                text: "断开";
+                clicked => { root.disconnect(); }
+            }
+        }
+
+        if !root.remote-connected : VerticalLayout {
+            spacing: 16px;
+            alignment: center;
+
+            if root.scanning : Rectangle {
+                vertical-stretch: 1;
+                horizontal-stretch: 1;
+                background: #111315;
+                border-radius: 8px;
+                clip: true;
+
+                Image {
+                    source: root.scan-preview;
+                    image-fit: cover;
+                }
+
+                Rectangle {
+                    width: min(parent.width * 0.62, parent.height * 0.62);
+                    height: self.width;
+                    x: (parent.width - self.width) / 2;
+                    y: (parent.height - self.height) / 2;
+                    background: transparent;
+                    border-width: 3px;
+                    border-color: #ffffff;
+                    border-radius: 8px;
+                }
+            }
+
+            if !root.scanning : Rectangle {
+                vertical-stretch: 1;
+                horizontal-stretch: 1;
+                background: transparent;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: 12px;
+
+                    Rectangle {
+                        width: 180px;
+                        height: self.width;
+                        border-radius: self.width / 2;
+                        background: #1d6f56;
+                        accessible-role: button;
+                        accessible-label: "扫描桌面端二维码";
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 5px;
+                            Text {
+                                text: "▦";
+                                font-size: 58px;
+                                color: white;
+                                horizontal-alignment: center;
+                            }
+                            Text {
+                                text: "扫描二维码";
+                                font-size: 18px;
+                                font-weight: 700;
+                                color: white;
+                                horizontal-alignment: center;
+                            }
+                        }
+                        TouchArea {
+                            enabled: !root.busy;
+                            clicked => { root.scan(); }
+                        }
+                    }
+
+                    Text {
+                        text: "扫描电脑屏幕上的配对码";
+                        font-size: 14px;
+                        color: #626971;
+                        horizontal-alignment: center;
+                    }
+                }
+            }
+
+            if root.scanning : Button {
+                text: "取消扫描";
+                clicked => { root.cancel-scan(); }
+            }
+        }
+
+        if root.remote-connected : VerticalLayout {
+            spacing: 12px;
+
+            Rectangle {
+                vertical-stretch: 1;
+                horizontal-stretch: 1;
+                background: transparent;
+
+                VerticalLayout {
+                    padding: 4px;
+                    spacing: 8px;
+                    alignment: center;
+
+                    Text {
+                        text: root.busy ? "桌面端正在处理" : root.recording ? "正在听，请说话" : "需要帮助时，点一下按钮";
+                        font-size: 18px;
+                        font-weight: 600;
+                        color: #272a2e;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+
+                    if root.response-text != "" : Text {
+                        text: root.response-text;
+                        font-size: 15px;
+                        color: #3d4349;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+
+                    if root.action-steps != "" : Text {
+                        text: root.action-steps;
+                        font-size: 13px;
+                        color: #1d6f56;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                        overflow: elide;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 180px;
+                horizontal-stretch: 1;
+                background: transparent;
+
+                Rectangle {
+                    width: 180px;
+                    height: self.width;
+                    x: (parent.width - self.width) / 2;
+                    border-radius: self.width / 2;
+                    background: root.recording ? #c93838 : root.busy ? #9ba1a7 : #1d6f56;
+                    accessible-role: button;
+                    accessible-label: root.recording ? "停止并发送语音" : "开始录音";
+
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 6px;
+                        Text {
+                            text: root.recording ? "■" : "●";
+                            font-size: 48px;
+                            color: white;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: root.recording ? "停止并发送" : "点一下说话";
+                            font-size: 18px;
+                            font-weight: 700;
+                            color: white;
+                            horizontal-alignment: center;
+                        }
+                    }
+
+                    TouchArea {
+                        enabled: !root.busy;
+                        clicked => { root.toggle-recording(); }
+                    }
+                }
+            }
+
+            if root.show-confirmation : VerticalLayout {
+                spacing: 8px;
+                Text {
+                    text: root.confirmation-text;
+                    font-size: 14px;
+                    color: #272a2e;
+                    horizontal-alignment: center;
+                    wrap: word-wrap;
+                }
+                HorizontalLayout {
+                    spacing: 10px;
+                    Button {
+                        text: "取消";
+                        clicked => { root.cancel-action(); }
+                    }
+                    Button {
+                        text: "确认执行";
+                        primary: true;
+                        clicked => { root.confirm-action(); }
+                    }
+                }
+            }
+        }
+    }
+}

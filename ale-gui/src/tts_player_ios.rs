@@ -21,8 +21,11 @@ pub fn play_audio(audio_data: &[u8]) -> Result<(), String> {
         // 创建 AVAudioPlayer
         let mut error: *mut AnyObject = std::ptr::null_mut();
         let player: *mut AnyObject = msg_send![class!(AVAudioPlayer), alloc];
-        let player: *mut AnyObject =
-            msg_send![player, initWithContentsOfURL: url error: &mut error];
+        let player: *mut AnyObject = msg_send![
+            player,
+            initWithContentsOfURL: url,
+            error: &mut error
+        ];
 
         if player.is_null() || !error.is_null() {
             let _ = std::fs::remove_file(&temp_file);

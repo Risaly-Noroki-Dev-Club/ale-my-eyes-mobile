@@ -1,0 +1,48 @@
+import { RemoteVoiceScreen } from "remote-voice.slint";
+
+export component AppWindow inherits Window {
+    title: "Ale, My Eyes!";
+    preferred-width: 360px;
+    preferred-height: 720px;
+    background: #f7f8fa;
+
+    in-out property <string> remote-status: "扫描桌面端二维码以开始";
+    in-out property <bool> remote-connected: false;
+    in-out property <image> remote-scan-preview;
+    in-out property <bool> remote-scanning: false;
+    in-out property <bool> voice-recording: false;
+    in-out property <bool> is-busy: false;
+    in-out property <string> ai-response: "";
+    in-out property <string> action-steps: "";
+    in-out property <bool> show-confirmation: false;
+    in-out property <string> confirmation-text: "";
+
+    callback scan-remote();
+    callback cancel-remote-scan();
+    callback toggle-listening();
+    callback disconnect-remote();
+    callback confirm-action();
+    callback cancel-action();
+
+    RemoteVoiceScreen {
+        width: parent.width;
+        height: parent.height;
+        remote-status: root.remote-status;
+        remote-connected: root.remote-connected;
+        scan-preview: root.remote-scan-preview;
+        scanning: root.remote-scanning;
+        recording: root.voice-recording;
+        busy: root.is-busy;
+        response-text: root.ai-response;
+        action-steps: root.action-steps;
+        show-confirmation: root.show-confirmation;
+        confirmation-text: root.confirmation-text;
+
+        scan => { root.scan-remote(); }
+        cancel-scan => { root.cancel-remote-scan(); }
+        toggle-recording => { root.toggle-listening(); }
+        disconnect => { root.disconnect-remote(); }
+        confirm-action => { root.confirm-action(); }
+        cancel-action => { root.cancel-action(); }
+    }
+}

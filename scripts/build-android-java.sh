@@ -39,6 +39,11 @@ find_android_jar() {
     exit 1
 }
 
+if [ ! -d "$JAVA_SRC" ]; then
+    echo "未配置自定义 Android Java 源码，跳过"
+    exit 0
+fi
+
 ANDROID_JAR="${1:-$(find_android_jar)}"
 echo "使用 android.jar: $ANDROID_JAR"
 
