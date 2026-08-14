@@ -1,0 +1,452 @@
+import { Button, Palette, ScrollView, Spinner } from "std-widgets.slint";
+
+component StatusDot inherits Rectangle {
+    in property <bool> connected: false;
+
+    width: 8px;
+    height: 24px;
+    background: transparent;
+
+    Rectangle {
+        width: 8px;
+        height: 8px;
+        y: (parent.height - self.height) / 2;
+        border-radius: 4px;
+        background: root.connected ? #107c10 : #797775;
+    }
+}
+
+component FeatureIcon inherits Rectangle {
+    in property <image> source;
+    in property <brush> foreground: Palette.accent-background;
+    in property <brush> surface: Palette.alternate-background;
+    in property <length> icon-size: 30px;
+
+    width: 64px;
+    height: 64px;
+    border-radius: 8px;
+    background: root.surface;
+
+    Image {
+        width: root.icon-size;
+        height: root.icon-size;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        source: root.source;
+        colorize: root.foreground;
+        image-fit: contain;
+    }
+}
+
+export component RemoteVoiceScreen inherits Rectangle {
+    in property <string> remote-status: "尚未连接";
+    in property <bool> remote-connected: false;
+    in property <image> scan-preview;
+    in property <bool> scanning: false;
+    in property <bool> recording: false;
+    in property <bool> busy: false;
+    in property <string> response-text: "";
+    in property <string> action-steps: "";
+    in property <bool> show-confirmation: false;
+    in property <string> confirmation-text: "";
+
+    callback scan();
+    callback cancel-scan();
+    callback toggle-recording();
+    callback disconnect();
+    callback confirm-action();
+    callback cancel-action();
+
+    private property <bool> compact-height: root.height < 620px;
+    private property <length> page-padding: root.width < 380px ? 16px : root.width < 600px ? 24px : 32px;
+    private property <length> content-width: min(root.width - root.page-padding * 2, 520px);
+    private property <length> section-gap: root.compact-height ? 12px : 20px;
+    private property <brush> secondary-foreground: Palette.foreground.with-alpha(0.62);
+    private property <brush> success-foreground: Palette.accent-background;
+
+    background: Palette.background;
+
+    Rectangle {
+        width: root.content-width;
+        height: parent.height;
+        x: (parent.width - self.width) / 2;
+        background: transparent;
+
+        VerticalLayout {
+            padding-top: root.compact-height ? 14px : 22px;
+            padding-bottom: root.compact-height ? 14px : 22px;
+            spacing: root.section-gap;
+
+            VerticalLayout {
+                spacing: 8px;
+
+                HorizontalLayout {
+                    alignment: space-between;
+                    spacing: 12px;
+
+                    Text {
+                        text: "ALE, MY EYES";
+                        font-size: 22px;
+                        font-weight: 700;
+                        color: Palette.foreground;
+                        vertical-alignment: center;
+                    }
+
+                    if root.remote-connected : Button {
+                        text: "断开";
+                        icon: @image-url("icons/plug-disconnected.svg");
+                        icon-size: 18px;
+                        colorize-icon: true;
+                        height: 40px;
+                        clicked => { root.disconnect(); }
+                    }
+                }
+
+                HorizontalLayout {
+                    spacing: 8px;
+
+                    StatusDot {
+                        connected: root.remote-connected;
+                    }
+
+                    Text {
+                        horizontal-stretch: 1;
+                        text: root.remote-status;
+                        font-size: 13px;
+                        color: root.remote-connected ? root.success-foreground : root.secondary-foreground;
+                        wrap: word-wrap;
+                        vertical-alignment: center;
+                    }
+                }
+            }
+
+            Rectangle {
+                height: 1px;
+                background: Palette.border;
+            }
+
+            if !root.remote-connected && !root.scanning : Rectangle {
+                vertical-stretch: 1;
+                background: transparent;
+
+                VerticalLayout {
+                    alignment: center;
+                    spacing: root.compact-height ? 12px : 16px;
+
+                    Rectangle {
+                        height: root.compact-height ? 56px : 72px;
+                        background: transparent;
+
+                        FeatureIcon {
+                            source: @image-url("icons/qr-code.svg");
+                            width: root.compact-height ? 56px : 72px;
+                            height: self.width;
+                            x: (parent.width - self.width) / 2;
+                            icon-size: root.compact-height ? 27px : 34px;
+                        }
+                    }
+
+                    Text {
+                        text: "连接到电脑";
+                        font-size: root.compact-height ? 22px : 26px;
+                        font-weight: 600;
+                        color: Palette.foreground;
+                        horizontal-alignment: center;
+                    }
+
+                    Text {
+                        width: min(parent.width, 360px);
+                        text: "扫描桌面端显示的配对二维码";
+                        font-size: 14px;
+                        color: root.secondary-foreground;
+                        horizontal-alignment: center;
+                        wrap: word-wrap;
+                    }
+
+                    Rectangle { height: root.compact-height ? 0px : 4px; }
+
+                    Button {
+                        width: min(parent.width, 320px);
+                        height: 52px;
+                        text: "扫描二维码";
+                        icon: @image-url("icons/qr-code.svg");
+                        icon-size: 22px;
+                        colorize-icon: true;
+                        primary: true;
+                        enabled: !root.busy;
+                        clicked => { root.scan(); }
+                    }
+
+                    HorizontalLayout {
+                        width: min(parent.width, 320px);
+                        spacing: 6px;
+                        alignment: center;
+
+                        Image {
+                            width: 16px;
+                            height: 16px;
+                            source: @image-url("icons/shield-lock.svg");
+                            colorize: root.secondary-foreground;
+                        }
+
+                        Text {
+                            text: "连接在设备间端到端加密";
+                            font-size: 12px;
+                            color: root.secondary-foreground;
+                        }
+                    }
+                }
+            }
+
+            if !root.remote-connected && root.scanning : VerticalLayout {
+                vertical-stretch: 1;
+                spacing: root.compact-height ? 10px : 14px;
+
+                Text {
+                    text: "将电脑上的二维码放入取景框";
+                    font-size: 16px;
+                    font-weight: 600;
+                    color: Palette.foreground;
+                    horizontal-alignment: center;
+                }
+
+                Rectangle {
+                    horizontal-stretch: 1;
+                    height: self.width * 9 / 16;
+                    background: #111111;
+                    border-radius: 8px;
+                    clip: true;
+
+                    Image {
+                        source: root.scan-preview;
+                        image-fit: contain;
+                    }
+
+                    Rectangle {
+                        width: min(parent.width * 0.48, parent.height * 0.72);
+                        height: self.width;
+                        x: (parent.width - self.width) / 2;
+                        y: (parent.height - self.height) / 2;
+                        background: transparent;
+                        border-width: 3px;
+                        border-color: #ffffff;
+                        border-radius: 6px;
+                    }
+                }
+
+                Button {
+                    horizontal-stretch: 1;
+                    height: 48px;
+                    text: "取消扫描";
+                    icon: @image-url("icons/dismiss.svg");
+                    icon-size: 20px;
+                    colorize-icon: true;
+                    clicked => { root.cancel-scan(); }
+                }
+
+                Rectangle {
+                    vertical-stretch: 1;
+                    background: transparent;
+                }
+            }
+
+            if root.remote-connected : VerticalLayout {
+                vertical-stretch: 1;
+                spacing: root.compact-height ? 12px : 16px;
+
+                Rectangle {
+                    height: 52px;
+                    background: Palette.alternate-background;
+                    border-radius: 6px;
+
+                    HorizontalLayout {
+                        padding-left: 14px;
+                        padding-right: 14px;
+                        spacing: 10px;
+
+                        Image {
+                            width: 22px;
+                            height: 22px;
+                            source: @image-url("icons/checkmark-circle.svg");
+                            colorize: root.success-foreground;
+                            vertical-alignment: center;
+                        }
+
+                        VerticalLayout {
+                            alignment: center;
+                            spacing: 1px;
+
+                            Text {
+                                text: "已安全连接";
+                                font-size: 14px;
+                                font-weight: 600;
+                                color: Palette.foreground;
+                            }
+
+                            Text {
+                                text: "语音只发送到当前桌面会话";
+                                font-size: 12px;
+                                color: root.secondary-foreground;
+                            }
+                        }
+                    }
+                }
+
+                ScrollView {
+                    vertical-stretch: 1;
+                    viewport-width: self.width;
+
+                    VerticalLayout {
+                        padding-top: 8px;
+                        padding-bottom: 8px;
+                        spacing: 12px;
+                        alignment: start;
+
+                        if root.busy : HorizontalLayout {
+                            vertical-stretch: 0;
+                            alignment: center;
+                            spacing: 10px;
+
+                            Spinner {
+                                width: 22px;
+                                height: 22px;
+                                indeterminate: true;
+                            }
+
+                            Text {
+                                text: "桌面端正在处理";
+                                font-size: 16px;
+                                font-weight: 600;
+                                color: Palette.foreground;
+                            }
+                        }
+
+                        if !root.busy && root.response-text == "" : Text {
+                            vertical-stretch: 0;
+                            text: root.recording ? "正在听，请说话" : "准备就绪";
+                            font-size: 22px;
+                            font-weight: 600;
+                            color: Palette.foreground;
+                            horizontal-alignment: center;
+                        }
+
+                        if root.response-text != "" : Text {
+                            vertical-stretch: 0;
+                            text: root.response-text;
+                            font-size: 16px;
+                            color: Palette.foreground;
+                            wrap: word-wrap;
+                        }
+
+                        if root.action-steps != "" : Text {
+                            vertical-stretch: 0;
+                            text: "待执行操作";
+                            font-size: 12px;
+                            font-weight: 600;
+                            color: root.success-foreground;
+                        }
+
+                        if root.action-steps != "" : Text {
+                            vertical-stretch: 0;
+                            text: root.action-steps;
+                            font-size: 14px;
+                            color: Palette.foreground;
+                            wrap: word-wrap;
+                        }
+                    }
+                }
+
+                Button {
+                    horizontal-stretch: 1;
+                    height: 54px;
+                    text: root.recording ? "停止并发送" : "开始说话";
+                    icon: root.recording ? @image-url("icons/record-stop.svg") : @image-url("icons/mic.svg");
+                    icon-size: 24px;
+                    colorize-icon: true;
+                    primary: true;
+                    enabled: !root.busy;
+                    clicked => { root.toggle-recording(); }
+                }
+            }
+        }
+    }
+
+    if root.show-confirmation : Rectangle {
+        background: #00000066;
+
+        TouchArea { }
+
+        Rectangle {
+            width: min(parent.width - 32px, 420px);
+            height: min(parent.height - 48px, 280px);
+            x: (parent.width - self.width) / 2;
+            y: (parent.height - self.height) / 2;
+            background: Palette.background;
+            border-radius: 8px;
+            drop-shadow-blur: 24px;
+            drop-shadow-color: #00000040;
+            drop-shadow-offset-y: 8px;
+
+            VerticalLayout {
+                padding: 20px;
+                spacing: 16px;
+
+                HorizontalLayout {
+                    spacing: 12px;
+
+                    FeatureIcon {
+                        width: 48px;
+                        height: 48px;
+                        icon-size: 24px;
+                        source: @image-url("icons/shield-lock.svg");
+                    }
+
+                    VerticalLayout {
+                        alignment: center;
+
+                        Text {
+                            text: "确认执行";
+                            font-size: 20px;
+                            font-weight: 600;
+                            color: Palette.foreground;
+                        }
+
+                        Text {
+                            text: "请检查桌面端准备执行的操作";
+                            font-size: 12px;
+                            color: root.secondary-foreground;
+                        }
+                    }
+                }
+
+                Text {
+                    vertical-stretch: 1;
+                    text: root.confirmation-text;
+                    font-size: 14px;
+                    color: Palette.foreground;
+                    wrap: word-wrap;
+                    overflow: elide;
+                }
+
+                HorizontalLayout {
+                    spacing: 10px;
+
+                    Button {
+                        horizontal-stretch: 1;
+                        height: 46px;
+                        text: "取消";
+                        clicked => { root.cancel-action(); }
+                    }
+
+                    Button {
+                        horizontal-stretch: 1;
+                        height: 46px;
+                        text: "确认执行";
+                        primary: true;
+                        clicked => { root.confirm-action(); }
+                    }
+                }
+            }
+        }
+    }
+}

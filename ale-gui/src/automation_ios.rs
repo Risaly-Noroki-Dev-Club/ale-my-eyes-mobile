@@ -1,4 +1,4 @@
-use ale_core::actions::{Action, ActionPlan, MouseButton};
+use ale_core::actions::{Action, ActionPlan};
 use ale_core::{AleError, Result};
 
 /// iOS 自动化引擎配置
@@ -109,12 +109,14 @@ impl IosAutomationEngine {
             }
 
             let app: *mut AnyObject = msg_send![class!(UIApplication), sharedApplication];
-            let _: () = msg_send![app, openURL: ns_url options: {
-                let empty_dict: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
-                empty_dict
-            } completionHandler: {
-                // 完成回调（简化为空）
-            }];
+            let empty_options: *mut AnyObject = msg_send![class!(NSDictionary), dictionary];
+            let completion: Option<&block2::Block<dyn Fn(objc2::runtime::Bool)>> = None;
+            let _: () = msg_send![
+                app,
+                openURL: ns_url,
+                options: empty_options,
+                completionHandler: completion
+            ];
         }
 
         Ok(())

@@ -10,7 +10,6 @@ NC="\033[0m"
 DEFAULT_NDK_VERSION="27.3.13750724"
 DEFAULT_TARGETS="aarch64-linux-android"
 PACKAGE_DIR="ale-my-eyes-android"
-TARGET_ANDROID_API="34"
 
 log_info() {
     printf "%b%s%b\n" "$GREEN" "$1" "$NC"
@@ -66,28 +65,6 @@ resolve_sdk_root() {
 
     log_error "未找到 Android SDK"
     log_error "请安装 Android Studio，或设置 ANDROID_HOME=/path/to/android-sdk"
-    exit 1
-}
-
-resolve_android_jar() {
-    local sdk_root="$1"
-    local preferred="$sdk_root/platforms/android-$TARGET_ANDROID_API/android.jar"
-
-    if [ -f "$preferred" ]; then
-        printf "%s\n" "$preferred"
-        return
-    fi
-
-    local jar=""
-    jar=$(find "$sdk_root/platforms" -mindepth 2 -maxdepth 2 -name android.jar -type f 2>/dev/null | sort -V | tail -n 1 || true)
-    if [ -n "$jar" ]; then
-        log_warn "未找到 android-$TARGET_ANDROID_API，回退到: $jar"
-        printf "%s\n" "$jar"
-        return
-    fi
-
-    log_error "未找到 android.jar"
-    log_error "请在 Android Studio 的 SDK Platforms 中安装 Android API $TARGET_ANDROID_API"
     exit 1
 }
 
@@ -158,18 +135,54 @@ resolve_ndk_root() {
     exit 1
 }
 
-ensure_java_tools() {
-    if ! command -v javac >/dev/null 2>&1; then
-        log_error "未找到 javac。macOS 可运行: brew install openjdk@17"
-        exit 1
-    fi
+ensure_signing_tools() {
     require_command keytool
 }
 
 ensure_cargo_apk() {
-    if ! cargo apk --version >/dev/null 2>&1; then
+    if ! cargo apk --help >/dev/null 2>&1; then
         log_info "安装 cargo-apk..."
         cargo install cargo-apk
+    fi
+}
+
+resolve_ndk_toolchain_bin() {
+    local ndk_root="$1"
+    local prebuilt_root="$ndk_root/toolchains/llvm/prebuilt"
+    local toolchain_bin=""
+
+    toolchain_bin=$(find "$prebuilt_root" -mindepth 2 -maxdepth 2 -type d -name bin 2>/dev/null | head -n 1 || true)
+    if [ -z "$toolchain_bin" ]; then
+        log_error "未找到 NDK LLVM 工具链: $prebuilt_root"
+        exit 1
+    fi
+
+    printf "%s\n" "$toolchain_bin"
+}
+
+configure_target_compiler() {
+    local target="$1"
+    local toolchain_bin="$2"
+    local cc=""
+    local cxx=""
+
+    case "$target" in
+        aarch64-linux-android)
+            cc="$toolchain_bin/aarch64-linux-android26-clang"
+            cxx="$toolchain_bin/aarch64-linux-android26-clang++"
+            export CC_aarch64_linux_android="$cc"
+            export CXX_aarch64_linux_android="$cxx"
+            export AR_aarch64_linux_android="$toolchain_bin/llvm-ar"
+            ;;
+        *)
+            log_error "不支持的 Android target: $target"
+            exit 1
+            ;;
+    esac
+
+    if [ ! -x "$cc" ] || [ ! -x "$cxx" ]; then
+        log_error "NDK 缺少 $target 编译器"
+        exit 1
     fi
 }
 
@@ -204,9 +217,6 @@ output_name_for_target() {
     case "$1" in
         aarch64-linux-android)
             printf "%s\n" "ale-my-eyes-arm64.apk"
-            ;;
-        armv7-linux-androideabi)
-            printf "%s\n" "ale-my-eyes-armv7.apk"
             ;;
         *)
             log_error "不支持的 Android target: $1"
@@ -244,9 +254,11 @@ locate_apk_for_target() {
 build_target() {
     local target="$1"
     local output_name="$2"
+    local toolchain_bin="$3"
     local apk_path=""
 
     clear_apk_outputs "$target"
+    configure_target_compiler "$target" "$toolchain_bin"
 
     log_info "构建 $target..."
     ANDROID_HOME="$ANDROID_HOME" ANDROID_NDK_ROOT="$ANDROID_NDK_ROOT" cargo apk build -p ale-gui --target "$target" --lib --release
@@ -277,28 +289,25 @@ print_summary() {
     if [ -f "$PACKAGE_DIR/ale-my-eyes-arm64.apk" ]; then
         printf "arm64 APK: %s/%s\n" "$PACKAGE_DIR" "ale-my-eyes-arm64.apk"
     fi
-    if [ -f "$PACKAGE_DIR/ale-my-eyes-armv7.apk" ]; then
-        printf "armv7 APK: %s/%s\n" "$PACKAGE_DIR" "ale-my-eyes-armv7.apk"
-    fi
 }
 
 main() {
     local sdk_root=""
     local ndk_root=""
-    local android_jar=""
     local build_tools_root=""
+    local ndk_toolchain_bin=""
     local output_name=""
 
     require_repo_root
     require_command rustup
     require_command cargo
     require_command find
-    ensure_java_tools
+    ensure_signing_tools
 
     sdk_root=$(resolve_sdk_root)
     ndk_root=$(resolve_ndk_root "$sdk_root")
-    android_jar=$(resolve_android_jar "$sdk_root")
     build_tools_root=$(resolve_build_tools "$sdk_root")
+    ndk_toolchain_bin=$(resolve_ndk_toolchain_bin "$ndk_root")
 
     export ANDROID_HOME="$sdk_root"
     export ANDROID_NDK_ROOT="$ndk_root"
@@ -311,13 +320,9 @@ main() {
 
     log_info "使用 Android SDK: $ANDROID_HOME"
     log_info "使用 Android NDK: $ANDROID_NDK_ROOT"
-    log_info "使用 android.jar: $android_jar"
     log_info "使用 build-tools: $build_tools_root"
 
     ensure_cargo_apk
-
-    log_info "编译 Android Java 源码..."
-    bash scripts/build-android-java.sh "$android_jar"
 
     read -r -a BUILD_TARGETS <<< "${ANDROID_BUILD_TARGETS:-$DEFAULT_TARGETS}"
     log_info "添加 Android Rust targets..."
@@ -328,7 +333,7 @@ main() {
 
     for target in "${BUILD_TARGETS[@]}"; do
         output_name=$(output_name_for_target "$target")
-        build_target "$target" "$output_name"
+        build_target "$target" "$output_name" "$ndk_toolchain_bin"
     done
 
     create_archive

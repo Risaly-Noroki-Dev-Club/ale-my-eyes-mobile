@@ -2,190 +2,113 @@ name: Build and Release
 
 on:
   push:
-    branches:
-      - master
-      - main
-    tags:
-      - 'v*'
+    branches: [main]
+    tags: ['v*']
   pull_request:
-    branches:
-      - master
-      - main
+    branches: [main]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: 'Release tag for manual publishing; defaults to manual-<run number> when empty'
+        description: 'Release tag; defaults to manual-<run number>'
         required: false
         type: string
-      build_target:
-        description: 'Build target for manual runs'
-        required: false
-        default: all
-        type: choice
-        options:
-          - all
-          - android
 
 permissions:
-  contents: write
+  contents: read
+
+env:
+  ANDROID_NDK_VERSION: 27.3.13750724
 
 jobs:
   check:
-    name: Check workspace
+    name: Check mobile workspace
     runs-on: ubuntu-latest
-    if: github.event_name != 'workflow_dispatch' || github.event.inputs.build_target != 'android'
     steps:
       - uses: actions/checkout@v4
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Linux dependencies
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libasound2-dev libfontconfig-dev libpipewire-0.3-dev libwayland-dev libxrandr-dev libdbus-1-dev libegl-dev libgbm-dev libxcb-shape0-dev libxcb-xfixes0-dev
-
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-
-      - name: Check workspace
-        run: cargo check --workspace
-
-  build-windows:
-    name: Build Windows executable
-    needs: check
-    if: (github.event_name == 'workflow_dispatch' && github.event.inputs.build_target != 'android') || startsWith(github.ref, 'refs/tags/')
-    runs-on: windows-latest
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Build
-        run: |
-          cargo build --release -p ale-gui
-          cp target/release/ale-gui.exe ale-my-eyes-windows.exe
-
-      - name: Upload Windows executable
-        uses: actions/upload-artifact@v4
         with:
-          name: ale-my-eyes-windows
-          path: ale-my-eyes-windows.exe
-
-  build-linux:
-    name: Build Ubuntu deb
-    needs: check
-    if: (github.event_name == 'workflow_dispatch' && github.event.inputs.build_target != 'android') || startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install Dependencies
-        run: sudo apt-get update && sudo apt-get install -y libspeechd-dev libasound2-dev libfontconfig-dev libpipewire-0.3-dev libwayland-dev libxrandr-dev libdbus-1-dev libegl-dev libgbm-dev libxcb-shape0-dev libxcb-xfixes0-dev
-
-      - name: Build
-        run: cargo build --release -p ale-cli -p ale-gui
-
-      - name: Create deb package
-        run: |
-          PACKAGE_ROOT="dist/deb/ale-my-eyes"
-          mkdir -p "${PACKAGE_ROOT}/DEBIAN" "${PACKAGE_ROOT}/usr/bin"
-          cp target/release/ale-cli "${PACKAGE_ROOT}/usr/bin/"
-          cp target/release/ale-gui "${PACKAGE_ROOT}/usr/bin/"
-          cat > "${PACKAGE_ROOT}/DEBIAN/control" <<'EOF'
-          Package: ale-my-eyes
-          Version: 0.1.0
-          Section: utils
-          Priority: optional
-          Architecture: amd64
-          Maintainer: Risaly Noroki Dev Club <erika@risnordev.org>
-          Description: Intelligent visual assistant with voice and screen understanding
-          EOF
-          dpkg-deb --build "${PACKAGE_ROOT}" ale-my-eyes_0.1.0_amd64.deb
-
-      - name: Upload Ubuntu deb
-        uses: actions/upload-artifact@v4
-        with:
-          name: ale-my-eyes-linux
-          path: ale-my-eyes_0.1.0_amd64.deb
-
-  build-android:
-    name: Build Android package
-    env:
-      ANDROID_NDK_VERSION: 27.3.13750724
-    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
+          targets: aarch64-linux-android
       - name: Install Java
         uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
-
-      - name: Install Android targets
-        run: |
-          rustup target add aarch64-linux-android
-          rustup target add armv7-linux-androideabi
-
-      - name: Install cargo-apk
-        run: cargo install cargo-apk
-
       - name: Install Android NDK
         run: |
-          ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
-          export ANDROID_HOME="${ANDROID_SDK_ROOT}"
-          "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" "ndk;${ANDROID_NDK_VERSION}"
-          "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-30"
-          "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" "platforms;android-34"
-          yes | "${ANDROID_SDK_ROOT}/cmdline-tools/latest/bin/sdkmanager" --licenses
-
-      - name: Build
+          ANDROID_HOME="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "ndk;${ANDROID_NDK_VERSION}" "platforms;android-34"
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Test core
+        run: cargo test -p ale-core
+      - name: Check Android client
         run: |
-          ANDROID_SDK_ROOT="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
-          export ANDROID_HOME="${ANDROID_SDK_ROOT}"
-          export ANDROID_NDK_VERSION="${ANDROID_NDK_VERSION}"
-          ./scripts/package-android.sh
+          TOOLCHAIN_BIN="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          export ANDROID_NDK_ROOT="${ANDROID_HOME}/ndk/${ANDROID_NDK_VERSION}"
+          export CC_aarch64_linux_android="${TOOLCHAIN_BIN}/aarch64-linux-android26-clang"
+          export CXX_aarch64_linux_android="${TOOLCHAIN_BIN}/aarch64-linux-android26-clang++"
+          export AR_aarch64_linux_android="${TOOLCHAIN_BIN}/llvm-ar"
+          cargo check -p ale-gui --target aarch64-linux-android --lib
 
-      - name: Upload Android apks
-        uses: actions/upload-artifact@v4
-        with:
-          name: ale-my-eyes-android
-          path: |
-            ale-my-eyes-android/ale-my-eyes-arm64.apk
-            ale-my-eyes-android/ale-my-eyes-armv7.apk
-
-  release:
-    name: Publish GitHub release
-    needs: [build-windows, build-linux, build-android]
+  build-android:
+    name: Package Android
+    needs: check
     if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
         with:
+          targets: aarch64-linux-android
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Install Android dependencies
+        run: |
+          ANDROID_HOME="${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=${ANDROID_HOME}" >> "$GITHUB_ENV"
+          "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" "ndk;${ANDROID_NDK_VERSION}" "platforms;android-34"
+          cargo install cargo-apk
+      - name: Configure release signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [ -z "${ANDROID_KEYSTORE_BASE64}" ] || [ -z "${ANDROID_KEYSTORE_PASSWORD}" ]; then
+            echo "ANDROID_KEYSTORE_BASE64 and ANDROID_KEYSTORE_PASSWORD secrets are required" >&2
+            exit 1
+          fi
+          KEYSTORE_PATH="${RUNNER_TEMP}/ale-my-eyes-release.keystore"
+          printf '%s' "${ANDROID_KEYSTORE_BASE64}" | base64 --decode > "${KEYSTORE_PATH}"
+          echo "CARGO_APK_RELEASE_KEYSTORE=${KEYSTORE_PATH}" >> "$GITHUB_ENV"
+          echo "CARGO_APK_RELEASE_KEYSTORE_PASSWORD=${ANDROID_KEYSTORE_PASSWORD}" >> "$GITHUB_ENV"
+      - name: Build APKs
+        run: ./scripts/package-android.sh
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: ale-my-eyes-android
+          path: ale-my-eyes-android/*.apk
+
+  release:
+    name: Publish release
+    needs: build-android
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ale-my-eyes-android
           path: artifacts
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.release_tag || format('manual-{0}', github.run_number)) || github.ref_name }}
-          name: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.release_tag || format('manual-{0}', github.run_number)) || github.ref_name }}
-          files: |
-            artifacts/ale-my-eyes-windows/ale-my-eyes-windows.exe
-            artifacts/ale-my-eyes-linux/ale-my-eyes_0.1.0_amd64.deb
-            artifacts/ale-my-eyes-android/ale-my-eyes-arm64.apk
-            artifacts/ale-my-eyes-android/ale-my-eyes-armv7.apk
-          draft: false
-          prerelease: false
+          tag_name: ${{ github.event_name == 'workflow_dispatch' && (inputs.release_tag || format('manual-{0}', github.run_number)) || github.ref_name }}
+          name: ${{ github.event_name == 'workflow_dispatch' && (inputs.release_tag || format('manual-{0}', github.run_number)) || github.ref_name }}
+          files: artifacts/*.apk

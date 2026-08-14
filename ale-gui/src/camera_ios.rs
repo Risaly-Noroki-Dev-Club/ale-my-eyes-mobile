@@ -144,7 +144,7 @@ fn frame_to_jpeg(frame: &CameraFrame, quality: u8) -> Result<Vec<u8>> {
 
 /// 初始化 iOS 相机（通过 objc2 调用 AVFoundation）
 fn init_ios_camera(
-    latest_frame: Arc<Mutex<Option<CameraFrame>>>,
+    _latest_frame: Arc<Mutex<Option<CameraFrame>>>,
     running: Arc<Mutex<bool>>,
     width: u32,
     height: u32,
@@ -173,7 +173,11 @@ fn init_ios_camera(
 
         // 创建 AVCaptureDeviceInput
         let mut error: *mut AnyObject = std::ptr::null_mut();
-        let input: *mut AnyObject = msg_send![class!(AVCaptureDeviceInput), deviceInputWithDevice: device error: &mut error];
+        let input: *mut AnyObject = msg_send![
+            class!(AVCaptureDeviceInput),
+            deviceInputWithDevice: device,
+            error: &mut error
+        ];
 
         if input.is_null() || !error.is_null() {
             return Err(AleError::Other(anyhow::anyhow!(
@@ -205,7 +209,7 @@ fn init_ios_camera(
             msg_send![class!(NSNumber), numberWithUnsignedInt: pixel_format_value];
         let settings_dict: *mut AnyObject = msg_send![
             class!(NSDictionary),
-            dictionaryWithObject: format_number
+            dictionaryWithObject: format_number,
             forKey: pixel_format_key
         ];
         let _: () = msg_send![output, setVideoSettings: settings_dict];

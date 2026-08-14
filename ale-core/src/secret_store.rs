@@ -14,9 +14,51 @@ pub struct SystemSecretStore;
 
 impl SystemSecretStore {
     fn entry(&self) -> Result<keyring::Entry> {
+        initialize_platform_store()?;
         keyring::Entry::new(SERVICE, ACCOUNT)
             .map_err(|error| AleError::ConfigError(format!("无法初始化系统凭据库: {error}")))
     }
+}
+
+#[cfg(target_os = "ios")]
+fn initialize_platform_store() -> Result<()> {
+    static INITIALIZED: std::sync::OnceLock<std::result::Result<(), String>> =
+        std::sync::OnceLock::new();
+
+    match INITIALIZED.get_or_init(|| {
+        let store = apple_native_keyring_store::protected::Store::new()
+            .map_err(|error| error.to_string())?;
+        keyring_core::set_default_store(store);
+        Ok(())
+    }) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(AleError::ConfigError(format!(
+            "无法初始化 iOS Keychain: {error}"
+        ))),
+    }
+}
+
+#[cfg(target_os = "android")]
+fn initialize_platform_store() -> Result<()> {
+    static INITIALIZED: std::sync::OnceLock<std::result::Result<(), String>> =
+        std::sync::OnceLock::new();
+
+    match INITIALIZED.get_or_init(|| {
+        let store =
+            android_native_keyring_store::Store::new().map_err(|error| error.to_string())?;
+        keyring_core::set_default_store(store);
+        Ok(())
+    }) {
+        Ok(()) => Ok(()),
+        Err(error) => Err(AleError::ConfigError(format!(
+            "无法初始化 Android Keystore: {error}"
+        ))),
+    }
+}
+
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+fn initialize_platform_store() -> Result<()> {
+    Ok(())
 }
 
 impl SecretStore for SystemSecretStore {

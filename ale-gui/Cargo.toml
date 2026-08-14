@@ -1,6 +1,6 @@
 [package]
 name = "ale-gui"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [lib]
@@ -29,13 +29,16 @@ slint = { version = "1.16", features = ["backend-android-activity-06"] }
 oboe = "0.6"
 jni = "0.21"
 ndk-context = "0.1"
-mdns-sd = "0.11"
+ndk = { version = "0.9", features = ["media", "nativewindow", "api-level-26"] }
+ndk-sys = { version = "0.6", features = ["media", "nativewindow"] }
+quircs = "0.10.3"
 
 # iOS-only dependencies
 [target.'cfg(target_os = "ios")'.dependencies]
 slint = "1.16"
 cpal = "0.15"
 objc2 = "0.6"
+block2 = "0.6"
 objc2-foundation = "0.3"
 objc2-av-foundation = "0.3"
 
@@ -44,7 +47,7 @@ slint-build = "1.16"
 
 [package.metadata.android]
 package = "com.alemyeyes"
-build_targets = ["aarch64-linux-android", "armv7-linux-androideabi"]
+build_targets = ["aarch64-linux-android"]
 
 [package.metadata.android.sdk]
 min_sdk_version = 26
@@ -54,6 +57,10 @@ target_sdk_version = 34
 label = "Ale, My Eyes!"
 theme = "@android:style/Theme.Material.Light.NoActionBar"
 
+[package.metadata.android.application.activity]
+resizeable_activity = true
+config_changes = "orientation|keyboardHidden|screenSize|screenLayout|smallestScreenSize|density|uiMode"
+
 [[package.metadata.android.uses_permission]]
 name = "android.permission.INTERNET"
 
@@ -62,3 +69,6 @@ name = "android.permission.RECORD_AUDIO"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.MODIFY_AUDIO_SETTINGS"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.CAMERA"

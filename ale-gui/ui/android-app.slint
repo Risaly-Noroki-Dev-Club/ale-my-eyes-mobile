@@ -1,0 +1,51 @@
+import { Palette } from "std-widgets.slint";
+import { RemoteVoiceScreen } from "remote-voice.slint";
+
+export component AppWindow inherits Window {
+    title: "Ale, My Eyes!";
+    preferred-width: 390px;
+    preferred-height: 844px;
+    background: Palette.background;
+
+    in-out property <string> remote-status: "扫描桌面端二维码以开始";
+    in-out property <bool> remote-connected: false;
+    in-out property <image> remote-scan-preview;
+    in-out property <bool> remote-scanning: false;
+    in-out property <bool> voice-recording: false;
+    in-out property <bool> is-busy: false;
+    in-out property <string> ai-response: "";
+    in-out property <string> action-steps: "";
+    in-out property <bool> show-confirmation: false;
+    in-out property <string> confirmation-text: "";
+
+    callback scan-remote();
+    callback cancel-remote-scan();
+    callback toggle-listening();
+    callback disconnect-remote();
+    callback confirm-action();
+    callback cancel-action();
+
+    RemoteVoiceScreen {
+        x: root.safe-area-insets.left;
+        y: root.safe-area-insets.top;
+        width: parent.width - root.safe-area-insets.left - root.safe-area-insets.right;
+        height: parent.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
+        remote-status: root.remote-status;
+        remote-connected: root.remote-connected;
+        scan-preview: root.remote-scan-preview;
+        scanning: root.remote-scanning;
+        recording: root.voice-recording;
+        busy: root.is-busy;
+        response-text: root.ai-response;
+        action-steps: root.action-steps;
+        show-confirmation: root.show-confirmation;
+        confirmation-text: root.confirmation-text;
+
+        scan => { root.scan-remote(); }
+        cancel-scan => { root.cancel-remote-scan(); }
+        toggle-recording => { root.toggle-listening(); }
+        disconnect => { root.disconnect-remote(); }
+        confirm-action => { root.confirm-action(); }
+        cancel-action => { root.cancel-action(); }
+    }
+}

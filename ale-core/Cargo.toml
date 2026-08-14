@@ -35,6 +35,14 @@ dirs = "5"
 urlencoding = "2"
 keyring = "4.1"
 
+[target.'cfg(target_os = "android")'.dependencies]
+android-native-keyring-store = "1"
+keyring-core = "1"
+
+[target.'cfg(target_os = "ios")'.dependencies]
+apple-native-keyring-store = { version = "1", features = ["protected"] }
+keyring-core = "1"
+
 [features]
 default = ["cloud"]
 tts = ["dep:tts"]

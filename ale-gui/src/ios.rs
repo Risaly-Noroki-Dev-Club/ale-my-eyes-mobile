@@ -10,9 +10,6 @@ use slint::ComponentHandle;
 #[cfg(target_os = "ios")]
 #[unsafe(no_mangle)]
 pub extern "C" fn ios_main() {
-    // 初始化日志
-    tracing_subscriber::fmt::init();
-
     // 配置 AVAudioSession（后台音频 + 录音模式）
     configure_audio_session();
 
@@ -62,10 +59,10 @@ fn configure_audio_session() {
         let mut error: *mut AnyObject = std::ptr::null_mut();
         let _: bool = msg_send![
             session,
-            setCategory:category_play_and_record
-            mode:mode_play_and_record
-            options:(1u64) // AVAudioSessionCategoryOptionDefaultToSpeaker
-            error:&mut error
+            setCategory: category_play_and_record,
+            mode: mode_play_and_record,
+            options: 1u64,
+            error: &mut error
         ];
 
         if !error.is_null() {
@@ -78,7 +75,7 @@ fn configure_audio_session() {
         }
 
         // 激活音频会话
-        let _: bool = msg_send![session, setActive:true error:&mut error];
+        let _: bool = msg_send![session, setActive: true, error: &mut error];
         if !error.is_null() {
             tracing::warn!("AVAudioSession setActive error");
         }
@@ -90,25 +87,28 @@ fn configure_audio_session() {
 /// 请求 iOS 运行时权限（相机、麦克风）
 #[cfg(target_os = "ios")]
 fn request_permissions() {
+    use block2::RcBlock;
     use objc2::runtime::AnyObject;
     use objc2::{class, msg_send};
 
     unsafe {
-        // 请求麦克风权限
-        let _: () = msg_send![
-            class!(AVAudioSession),
-            requestRecordPermission: { /* granted callback */ }
-        ];
+        let microphone_callback = RcBlock::new(|granted: objc2::runtime::Bool| {
+            tracing::info!("Microphone permission granted: {}", granted.as_bool());
+        });
+        let session: *mut AnyObject = msg_send![class!(AVAudioSession), sharedInstance];
+        let _: () = msg_send![session, requestRecordPermission: &*microphone_callback];
         tracing::info!("Microphone permission requested");
 
-        // 请求相机权限（AVCaptureDevice）
-        let device_class: *mut AnyObject = msg_send![class!(AVCaptureDevice), class];
-        if !device_class.is_null() {
-            let _: () = msg_send![
-                class!(AVCaptureDevice),
-                requestAccessForMediaType: { /* granted callback */ }
-            ];
-            tracing::info!("Camera permission requested");
-        }
+        let camera_callback = RcBlock::new(|granted: objc2::runtime::Bool| {
+            tracing::info!("Camera permission granted: {}", granted.as_bool());
+        });
+        let media_type_video: *mut AnyObject =
+            msg_send![class!(NSString), stringWithUTF8String: "vide\0".as_ptr()];
+        let _: () = msg_send![
+            class!(AVCaptureDevice),
+            requestAccessForMediaType: media_type_video,
+            completionHandler: &*camera_callback
+        ];
+        tracing::info!("Camera permission requested");
     }
 }
