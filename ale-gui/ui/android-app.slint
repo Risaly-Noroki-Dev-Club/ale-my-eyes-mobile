@@ -1,10 +1,11 @@
+import { Palette } from "std-widgets.slint";
 import { RemoteVoiceScreen } from "remote-voice.slint";
 
 export component AppWindow inherits Window {
     title: "Ale, My Eyes!";
-    preferred-width: 360px;
-    preferred-height: 720px;
-    background: #f7f8fa;
+    preferred-width: 390px;
+    preferred-height: 844px;
+    background: Palette.background;
 
     in-out property <string> remote-status: "扫描桌面端二维码以开始";
     in-out property <bool> remote-connected: false;
@@ -25,8 +26,10 @@ export component AppWindow inherits Window {
     callback cancel-action();
 
     RemoteVoiceScreen {
-        width: parent.width;
-        height: parent.height;
+        x: root.safe-area-insets.left;
+        y: root.safe-area-insets.top;
+        width: parent.width - root.safe-area-insets.left - root.safe-area-insets.right;
+        height: parent.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
         remote-status: root.remote-status;
         remote-connected: root.remote-connected;
         scan-preview: root.remote-scan-preview;

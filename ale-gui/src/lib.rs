@@ -1052,13 +1052,19 @@ fn setup_android_app(app: &AppWindow) {
                             app.set_remote_scan_preview(slint::Image::from_rgb8(pixels));
                         });
                     });
-                if let Ok(mut slot) = qr_scan_cancel.lock() {
+                let should_publish = qr_scan_cancel.lock().is_ok_and(|mut slot| {
                     if slot
                         .as_ref()
                         .is_some_and(|current| Arc::ptr_eq(current, &scan_token))
                     {
                         slot.take();
+                        true
+                    } else {
+                        false
                     }
+                });
+                if !should_publish {
+                    return;
                 }
                 let _ = app_weak.upgrade_in_event_loop(move |app| match scan_result {
                     Ok(pairing) => {
