@@ -48,7 +48,10 @@ pub fn scan_pairing_info(
                 if width == 0 || height == 0 {
                     return;
                 }
-                if preview_counter.fetch_add(1, Ordering::Relaxed) % 6 == 0 {
+                if preview_counter
+                    .fetch_add(1, Ordering::Relaxed)
+                    .is_multiple_of(6)
+                {
                     let preview_width = width / 2;
                     let preview_height = height / 2;
                     let mut preview_gray = Vec::with_capacity(preview_width * preview_height);

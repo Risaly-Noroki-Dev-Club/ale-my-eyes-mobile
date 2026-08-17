@@ -4,7 +4,7 @@
 
 The workspace is an Android-only arm64 client with two crates:
 
-- `ale-core`: portable protocol types, pairing URI validation, Noise transport, the persistent remote-session actor, and a deterministic mock v2 desktop.
+- `ale-core`: portable protocol types, pairing URI validation, Noise transport, the persistent remote-session actor, and a deterministic mock v3 desktop.
 - `ale-gui`: Android Activity integration, asynchronous runtime permissions, QR scanning, Oboe recording, Slint UI, and session binding.
 
 There is no iOS application and no local inference or automation engine in this repository.
@@ -14,13 +14,14 @@ There is no iOS application and no local inference or automation engine in this 
 1. The user grants camera access and scans an ephemeral desktop QR code.
 2. `PairingInfo` validates the IP address, port, UUID session ID, six-digit code, and optional desktop name.
 3. `RemoteSession` opens one WebSocket and completes a Noise `NNpsk0` handshake.
-4. The server sends `ServerHello`. Any protocol version other than v2 closes the connection without fallback.
+4. The server sends `ServerHello`. Any protocol version other than v3 closes the connection without fallback.
 5. One background actor owns the WebSocket and Noise state for the session lifetime. UI tasks communicate with it over a bounded command queue.
 6. Oboe requests 48 kHz mono float input. The successful stream's actual sample rate and channel count are validated and sent in `AudioStart`.
 7. Every 100 ms the UI drains the recorder, converts samples to little-endian PCM16, and sends chunks of at most 24,576 bytes.
 8. `AudioEnd` commits the chunk count, total frame count, and SHA-256. The desktop must validate all three before ASR.
-9. The actor routes preview and execution events by request ID. The user may confirm, reject, or cancel through the same session.
-10. Disconnect clears recording and pending confirmation state. The user must scan again.
+9. The actor routes progress, decisions, assistant output, preview, and execution events by request ID. Decisions always retain visible yes/no buttons.
+10. Android system TTS plays only the server-provided `speech_text`; confirmation and errors interrupt ordinary speech, while recording and disconnect stop the queue.
+11. Disconnect clears recording, speech, decision, and pending confirmation state. The user must scan again.
 
 ## Bounds and failure behavior
 
@@ -49,4 +50,4 @@ The Slint UI contains the active remote workflow only.
 
 ## Release boundary
 
-The mobile mock server validates this repository's client behavior, but it is not a substitute for the real desktop. Production release remains blocked until a desktop implementation passes the contract in `REMOTE-PROTOCOL-V2.md` and the two-AVD manual matrix in `ANDROID-RELEASE-CHECKLIST.md` is complete.
+The mobile mock server validates this repository's client behavior, but it is not a substitute for the real desktop. Production release remains blocked until a desktop implementation passes the contract in `REMOTE-PROTOCOL-V3.md` and the two-AVD manual matrix in `ANDROID-RELEASE-CHECKLIST.md` is complete.

@@ -28,5 +28,5 @@ uuid = { version = "1", features = ["v4", "serde"] }
 mock-server = []
 
 [[example]]
-name = "mock_remote_v2"
+name = "mock_remote_v3"
 required-features = ["mock-server"]

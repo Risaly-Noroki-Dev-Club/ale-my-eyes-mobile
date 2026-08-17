@@ -17,6 +17,9 @@ export component AppWindow inherits Window {
     in-out property <string> action-steps: "";
     in-out property <bool> show-confirmation: false;
     in-out property <string> confirmation-text: "";
+    in-out property <string> confirmation-title: "确认执行";
+    in-out property <string> confirmation-confirm-label: "确认执行";
+    in-out property <string> confirmation-cancel-label: "取消";
     in-out property <string> recording-time: "00:00 / 01:00";
     in-out property <bool> show-settings-action: false;
 
@@ -44,6 +47,9 @@ export component AppWindow inherits Window {
         action-steps: root.action-steps;
         show-confirmation: root.show-confirmation;
         confirmation-text: root.confirmation-text;
+        confirmation-title: root.confirmation-title;
+        confirmation-confirm-label: root.confirmation-confirm-label;
+        confirmation-cancel-label: root.confirmation-cancel-label;
         recording-time: root.recording-time;
         show-settings-action: root.show-settings-action;
 

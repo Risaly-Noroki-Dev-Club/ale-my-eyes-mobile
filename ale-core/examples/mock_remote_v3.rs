@@ -7,7 +7,7 @@ async fn main() {
         MockBehavior::Normal,
     )
     .await
-    .expect("start mock remote v2 server");
+    .expect("start mock remote v3 server");
     println!("{}", server.pairing.uri());
     std::future::pending::<()>().await;
 }

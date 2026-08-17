@@ -4,7 +4,9 @@ mod android;
 mod audio;
 mod qr_scanner;
 
-use ale_core::remote::{CommandPreview, PairingInfo, MAX_AUDIO_CHUNK_BYTES, MAX_RECORDING_SECONDS};
+use ale_core::remote::{
+    CommandPreview, DecisionRequest, PairingInfo, MAX_AUDIO_CHUNK_BYTES, MAX_RECORDING_SECONDS,
+};
 use ale_core::{RemoteSession, RemoteSessionEvent};
 use slint::ComponentHandle;
 use std::future::Future;
@@ -22,6 +24,7 @@ struct AppState {
     recorder: Option<audio::Recorder>,
     recording_request_id: Option<String>,
     pending_request_id: Option<String>,
+    pending_decision: Option<DecisionRequest>,
     recording_started: Option<Instant>,
 }
 
@@ -33,6 +36,7 @@ impl AppState {
             recorder: None,
             recording_request_id: None,
             pending_request_id: None,
+            pending_decision: None,
             recording_started: None,
         }
     }
@@ -41,12 +45,16 @@ impl AppState {
         self.recorder.take();
         self.recording_request_id = None;
         self.pending_request_id = None;
+        self.pending_decision = None;
         self.recording_started = None;
     }
 }
 
 pub fn setup_app(app: &AppWindow) {
-    app.set_remote_status("扫描桌面端 v2 二维码以开始".into());
+    app.set_remote_status("扫描桌面端 v3 二维码以开始".into());
+    if let Err(error) = android::initialize_tts() {
+        tracing::warn!("Android TTS initialization failed: {}", error);
+    }
     let state = Arc::new(Mutex::new(AppState::new()));
     let stream_gate = Arc::new(Mutex::new(()));
     let drain_running = Arc::new(AtomicBool::new(false));
@@ -163,7 +171,7 @@ fn start_qr_scan(
     app.set_is_busy(true);
     app.set_remote_connected(false);
     app.set_remote_scanning(true);
-    app.set_remote_status("将电脑上的 v2 二维码放入框内".into());
+    app.set_remote_status("将电脑上的 v3 二维码放入框内".into());
     let cancelled = Arc::new(AtomicBool::new(false));
     if let Ok(mut slot) = qr_scan_cancel.lock() {
         if let Some(previous) = slot.replace(cancelled.clone()) {
@@ -201,7 +209,7 @@ fn start_qr_scan(
         let _ = app_weak.upgrade_in_event_loop(move |app| match scan_result {
             Ok(pairing) => {
                 app.set_remote_scanning(false);
-                app.set_remote_status("二维码有效，正在建立 v2 加密会话".into());
+                app.set_remote_status("二维码有效，正在建立 v3 加密会话".into());
                 let app_weak = app.as_weak();
                 spawn_local_task(connect_session(pairing, state, stream_gate, app_weak));
             }
@@ -274,6 +282,40 @@ async fn connect_session(
                         Some(RemoteSessionEvent::ProtocolWarning(message)) => {
                             tracing::warn!("Remote protocol warning: {}", message);
                         }
+                        Some(RemoteSessionEvent::Progress(progress)) => {
+                            if let Some(app) = app_weak.upgrade() {
+                                app.set_remote_status(progress.message.into());
+                            }
+                        }
+                        Some(RemoteSessionEvent::DecisionRequested(decision)) => {
+                            let mut current = state.lock().await;
+                            if current.session_generation != generation {
+                                return;
+                            }
+                            current.pending_decision = Some(decision.clone());
+                            drop(current);
+                            if let Some(app) = app_weak.upgrade() {
+                                app.set_confirmation_title("需要你的决定".into());
+                                app.set_confirmation_text(decision.prompt.clone().into());
+                                app.set_confirmation_confirm_label("是".into());
+                                app.set_confirmation_cancel_label("否".into());
+                                app.set_show_confirmation(true);
+                                app.set_is_busy(false);
+                            }
+                            if let Err(error) = android::speak(&decision.prompt, true) {
+                                tracing::warn!("Android TTS failed: {}", error);
+                            }
+                        }
+                        Some(RemoteSessionEvent::AssistantOutput(output)) => {
+                            if let Some(app) = app_weak.upgrade() {
+                                app.set_ai_response(output.display_text.into());
+                            }
+                            if let Err(error) =
+                                android::speak(&output.speech_text, output.interrupt)
+                            {
+                                tracing::warn!("Android TTS failed: {}", error);
+                            }
+                        }
                         None => {}
                     }
                 }
@@ -284,7 +326,7 @@ async fn connect_session(
             app.set_is_busy(false);
             app.set_remote_status(
                 if error.code == ale_core::remote::error_code::PROTOCOL_INCOMPATIBLE {
-                    "桌面端版本过旧，需要支持远程协议 v2".into()
+                    "桌面端版本过旧，需要支持远程协议 v3".into()
                 } else {
                     slint::format!("连接失败: {}", error.message)
                 },
@@ -374,6 +416,7 @@ async fn start_recording(
     stream_gate: Arc<Mutex<()>>,
     app: &AppWindow,
 ) {
+    android::stop_tts();
     let _gate = stream_gate.lock().await;
     let recorder = match audio::Recorder::start() {
         Ok(recorder) => recorder,
@@ -534,6 +577,9 @@ async fn publish_preview(
     state.pending_request_id = preview.has_plan.then(|| preview.request_id.clone());
     drop(state);
     if let Some(app) = app_weak.upgrade() {
+        app.set_confirmation_title("确认执行".into());
+        app.set_confirmation_confirm_label("确认执行".into());
+        app.set_confirmation_cancel_label("取消".into());
         app.set_ai_response(preview.response_text.into());
         app.set_action_steps(preview.action_steps.join("\n").into());
         app.set_confirmation_text(preview.confirmation_text.into());
@@ -583,15 +629,36 @@ fn finish_confirmation(
     approved: bool,
 ) {
     spawn_local_task(async move {
-        let (session, request_id) = {
+        let (session, request_id, decision) = {
             let mut state = state.lock().await;
-            (state.session.clone(), state.pending_request_id.take())
+            (
+                state.session.clone(),
+                state.pending_request_id.take(),
+                state.pending_decision.take(),
+            )
         };
         let Some(app) = app_weak.upgrade() else {
             return;
         };
         app.set_is_busy(true);
         app.set_show_confirmation(false);
+        if let (Some(session), Some(decision)) = (session.clone(), decision) {
+            match session
+                .respond_to_decision(decision.request_id, decision.decision_id, approved)
+                .await
+            {
+                Ok(()) => app.set_remote_status(if approved {
+                    "已同意，桌面端继续处理".into()
+                } else {
+                    "已拒绝".into()
+                }),
+                Err(error) => {
+                    app.set_remote_status(slint::format!("发送决定失败: {}", error.message))
+                }
+            }
+            app.set_is_busy(false);
+            return;
+        }
         match (session, request_id) {
             (Some(session), Some(request_id)) => {
                 match session.confirm(request_id, approved).await {
@@ -647,12 +714,13 @@ fn wire_disconnect(
             if let Some(session) = session {
                 session.shutdown().await;
             }
+            android::stop_tts();
             if let Some(app) = app_weak.upgrade() {
                 reset_request_ui(&app);
                 app.set_remote_connected(false);
                 app.set_remote_scanning(false);
                 app.set_is_busy(false);
-                app.set_remote_status("已断开；请重新扫描桌面端 v2 二维码".into());
+                app.set_remote_status("已断开；请重新扫描桌面端 v3 二维码".into());
             }
         });
     });
@@ -662,6 +730,9 @@ fn reset_request_ui(app: &AppWindow) {
     app.set_voice_recording(false);
     app.set_recording_time("00:00 / 01:00".into());
     app.set_show_confirmation(false);
+    app.set_confirmation_title("确认执行".into());
+    app.set_confirmation_confirm_label("确认执行".into());
+    app.set_confirmation_cancel_label("取消".into());
 }
 
 fn spawn_local_task(future: impl Future<Output = ()> + 'static) {

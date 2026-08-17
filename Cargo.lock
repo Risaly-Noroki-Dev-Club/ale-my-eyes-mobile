@@ -204,6 +204,7 @@ dependencies = [
  "slint-build",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

@@ -1,7 +1,8 @@
 use crate::remote::{
-    AudioEnd, AudioFormat, AudioStart, CommandPreview, ExecutionState, ExecutionStatus,
-    PairingInfo, Ping, Pong, RemoteError, RemoteMessage, ServerHello, MAX_AUDIO_CHUNK_BYTES,
-    MAX_RECORDING_SECONDS, MAX_SAMPLE_RATE_HZ, MIN_SAMPLE_RATE_HZ,
+    AudioEnd, AudioFormat, AudioStart, CommandPreview, DecisionKind, DecisionRequest,
+    ExecutionState, ExecutionStatus, PairingInfo, Ping, Pong, RemoteError, RemoteMessage,
+    ServerHello, MAX_AUDIO_CHUNK_BYTES, MAX_RECORDING_SECONDS, MAX_SAMPLE_RATE_HZ,
+    MIN_SAMPLE_RATE_HZ,
 };
 use crate::remote_crypto::{server_handshake_reply, SecureChannel};
 use base64::Engine;
@@ -21,6 +22,7 @@ pub enum MockBehavior {
     SilentPreview,
     SilentConfirmation,
     LateConfirmation,
+    DecisionFlow,
 }
 
 pub struct MockRemoteServer {
@@ -40,7 +42,7 @@ impl MockRemoteServer {
             port: address.port(),
             session_id: uuid::Uuid::new_v4().to_string(),
             code: "654321".to_string(),
-            name: "Mock Desktop v2".to_string(),
+            name: "Mock Desktop v3".to_string(),
         };
         let server_pairing = pairing.clone();
         let (shutdown, mut shutdown_rx) = oneshot::channel();
@@ -125,6 +127,7 @@ async fn handle_connection(
 
     let mut audio: Option<AudioAssembler> = None;
     let mut client_hello_received = false;
+    let mut pending_decision: Option<(String, String)> = None;
     while let Some(frame) = socket.next().await {
         let frame = frame.map_err(|error| error.to_string())?;
         if !frame.is_binary() {
@@ -207,6 +210,22 @@ async fn handle_connection(
                         )
                         .await?;
                     }
+                    Ok(()) if behavior == MockBehavior::DecisionFlow => {
+                        let decision_id = uuid::Uuid::new_v4().to_string();
+                        pending_decision = Some((end.request_id.clone(), decision_id.clone()));
+                        send_secure(
+                            &mut socket,
+                            &mut secure,
+                            &RemoteMessage::DecisionRequest(DecisionRequest {
+                                request_id: end.request_id,
+                                decision_id,
+                                kind: DecisionKind::UseRemoteModel,
+                                prompt: "use remote".to_string(),
+                                expires_in_seconds: 30,
+                            }),
+                        )
+                        .await?;
+                    }
                     Ok(()) => {
                         send_secure(
                             &mut socket,
@@ -241,6 +260,29 @@ async fn handle_connection(
                             .to_string(),
                             actions_executed: usize::from(confirm.approved),
                         }),
+                    )
+                    .await?;
+                }
+            }
+            RemoteMessage::DecisionResponse(response) => {
+                if pending_decision.as_ref()
+                    != Some(&(response.request_id.clone(), response.decision_id.clone()))
+                {
+                    return Err("unexpected decision response".to_string());
+                }
+                pending_decision.take();
+                if response.approved {
+                    send_secure(
+                        &mut socket,
+                        &mut secure,
+                        &RemoteMessage::CommandPreview(preview(response.request_id)),
+                    )
+                    .await?;
+                } else {
+                    send_error(
+                        &mut socket,
+                        &mut secure,
+                        remote_error(Some(response.request_id), "CANCELLED", "decision rejected"),
                     )
                     .await?;
                 }

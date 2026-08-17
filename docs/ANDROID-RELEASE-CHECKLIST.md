@@ -4,7 +4,7 @@ Release is blocked until every required item below has evidence. Store local AVD
 
 ## Compatibility gate
 
-- [ ] Desktop implements `REMOTE-PROTOCOL-V2.md` without v1 fallback.
+- [ ] Desktop implements `REMOTE-PROTOCOL-V3.md` without fallback to older versions.
 - [ ] Desktop validates chunk sequence, byte limit, frame count, and SHA-256 before ASR.
 - [ ] Desktop cancellation and disconnect prevent later command execution.
 - [ ] Coordinated desktop/mobile release versions are recorded.
@@ -45,9 +45,9 @@ Run:
 
 This script validates lifecycle behavior. It does not claim camera QR or microphone workflow completion.
 
-## Manual v2 workflow on both AVDs
+## Manual v3 workflow on both AVDs
 
-For each AVD, use a reachable deterministic v2 desktop and save screenshots/logs for:
+For each AVD, use a reachable deterministic v3 desktop and save screenshots/logs for:
 
 - [ ] Scan and connect.
 - [ ] First denial and permanent denial for camera and microphone; settings recovery.

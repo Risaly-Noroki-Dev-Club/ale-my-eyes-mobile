@@ -1,8 +1,9 @@
 use crate::remote::{
-    error_code, new_request_id, AudioChunk, AudioEnd, AudioFormat, AudioStart, CancelRequest,
-    ClientHello, CommandPreview, ConfirmExecution, ExecutionStatus, PairingInfo, Ping, Pong,
-    RemoteError, RemoteMessage, ServerHello, MAX_AUDIO_CHUNK_BYTES, MAX_RECORDING_SECONDS,
-    MAX_SAMPLE_RATE_HZ, MIN_SAMPLE_RATE_HZ, REMOTE_PROTOCOL_VERSION,
+    error_code, new_request_id, AssistantOutput, AudioChunk, AudioEnd, AudioFormat, AudioStart,
+    CancelRequest, ClientHello, CommandPreview, ConfirmExecution, DecisionRequest,
+    DecisionResponse, ExecutionStatus, PairingInfo, Ping, Pong, ProgressUpdate, RemoteError,
+    RemoteMessage, ServerHello, MAX_AUDIO_CHUNK_BYTES, MAX_RECORDING_SECONDS, MAX_SAMPLE_RATE_HZ,
+    MIN_SAMPLE_RATE_HZ, REMOTE_PROTOCOL_VERSION,
 };
 use crate::remote_crypto::{client_finish_handshake, client_handshake_message, SecureChannel};
 use base64::Engine;
@@ -19,7 +20,7 @@ const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(not(test))]
 const PREVIEW_TIMEOUT: Duration = Duration::from_secs(90);
 #[cfg(test)]
-const PREVIEW_TIMEOUT: Duration = Duration::from_millis(500);
+const PREVIEW_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(not(test))]
 const CONFIRM_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
@@ -52,6 +53,9 @@ impl RemoteSessionError {
 pub enum RemoteSessionEvent {
     Disconnected(RemoteSessionError),
     ProtocolWarning(String),
+    Progress(ProgressUpdate),
+    DecisionRequested(DecisionRequest),
+    AssistantOutput(AssistantOutput),
 }
 
 #[derive(Clone)]
@@ -183,6 +187,23 @@ impl RemoteSession {
         response.await.map_err(|_| closed_error())?
     }
 
+    pub async fn respond_to_decision(
+        &self,
+        request_id: String,
+        decision_id: String,
+        approved: bool,
+    ) -> Result<(), RemoteSessionError> {
+        let (reply, response) = oneshot::channel();
+        self.send_command(SessionCommand::DecisionResponse {
+            request_id,
+            decision_id,
+            approved,
+            reply,
+        })
+        .await?;
+        response.await.map_err(|_| closed_error())?
+    }
+
     pub async fn cancel(&self, request_id: String) -> Result<(), RemoteSessionError> {
         let (reply, response) = oneshot::channel();
         self.send_command(SessionCommand::Cancel { request_id, reply })
@@ -221,6 +242,12 @@ enum SessionCommand {
         request_id: String,
         approved: bool,
         reply: oneshot::Sender<Result<ExecutionStatus, RemoteSessionError>>,
+    },
+    DecisionResponse {
+        request_id: String,
+        decision_id: String,
+        approved: bool,
+        reply: oneshot::Sender<Result<(), RemoteSessionError>>,
     },
     Cancel {
         request_id: String,
@@ -309,6 +336,7 @@ async fn run_session(
                     &mut pending_execution,
                     &retired_request_ids,
                     &mut unexpected_responses,
+                    &events,
                 ).await {
                     Ok(()) => {}
                     Err(value) => break value,
@@ -443,6 +471,26 @@ async fn handle_command(
                     Some(value)
                 }
             }
+        }
+        SessionCommand::DecisionResponse {
+            request_id,
+            decision_id,
+            approved,
+            reply,
+        } => {
+            let result = send_secure(
+                socket,
+                secure,
+                &RemoteMessage::DecisionResponse(DecisionResponse {
+                    request_id,
+                    decision_id,
+                    approved,
+                }),
+            )
+            .await;
+            let terminal = result.as_ref().err().cloned();
+            let _ = reply.send(result);
+            terminal
         }
         SessionCommand::Cancel { request_id, reply } => {
             let message = RemoteMessage::CancelRequest(CancelRequest {
@@ -587,6 +635,7 @@ async fn finish_audio(
     send_secure(socket, secure, &message).await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_remote_message(
     message: RemoteMessage,
     socket: &mut Socket,
@@ -595,6 +644,7 @@ async fn handle_remote_message(
     pending_execution: &mut Option<PendingExecution>,
     retired_request_ids: &VecDeque<String>,
     unexpected_responses: &mut u8,
+    events: &watch::Sender<Option<RemoteSessionEvent>>,
 ) -> Result<(), RemoteSessionError> {
     let matched = match message {
         RemoteMessage::CommandPreview(preview) => {
@@ -628,6 +678,36 @@ async fn handle_remote_message(
             } else {
                 false
             }
+        }
+        RemoteMessage::ProgressUpdate(progress)
+            if pending_preview
+                .as_ref()
+                .is_some_and(|pending| pending.request_id == progress.request_id) =>
+        {
+            events.send_replace(Some(RemoteSessionEvent::Progress(progress)));
+            true
+        }
+        RemoteMessage::DecisionRequest(decision)
+            if pending_preview
+                .as_ref()
+                .is_some_and(|pending| pending.request_id == decision.request_id) =>
+        {
+            events.send_replace(Some(RemoteSessionEvent::DecisionRequested(decision)));
+            true
+        }
+        RemoteMessage::AssistantOutput(output)
+            if output.request_id.is_none()
+                || output.request_id.as_ref().is_some_and(|request_id| {
+                    pending_preview
+                        .as_ref()
+                        .is_some_and(|pending| pending.request_id == *request_id)
+                        || pending_execution
+                            .as_ref()
+                            .is_some_and(|pending| pending.request_id == *request_id)
+                }) =>
+        {
+            events.send_replace(Some(RemoteSessionEvent::AssistantOutput(output)));
+            true
         }
         RemoteMessage::Error(remote)
             if remote
@@ -838,6 +918,36 @@ mod tests {
             let (request_id, preview) = upload(&session, 48_000, seconds).await;
             assert_eq!(preview.request_id, request_id);
         }
+    }
+
+    #[tokio::test]
+    async fn decision_request_can_be_answered_without_closing_preview() {
+        let (_server, session) = connect(MockBehavior::DecisionFlow).await;
+        let mut events = session.subscribe();
+        let request_id = session.begin_audio(48_000, 1).await.unwrap();
+        session
+            .send_audio_chunk(request_id.clone(), vec![0; 2_000])
+            .await
+            .unwrap();
+        let pending = tokio::spawn({
+            let session = session.clone();
+            let request_id = request_id.clone();
+            async move { session.finish_audio(request_id).await }
+        });
+        let decision = loop {
+            events.changed().await.unwrap();
+            if let Some(RemoteSessionEvent::DecisionRequested(decision)) =
+                events.borrow_and_update().clone()
+            {
+                break decision;
+            }
+        };
+        session
+            .respond_to_decision(decision.request_id, decision.decision_id, true)
+            .await
+            .unwrap();
+        let preview = pending.await.unwrap().unwrap();
+        assert_eq!(preview.request_id, request_id);
     }
 
     #[tokio::test]

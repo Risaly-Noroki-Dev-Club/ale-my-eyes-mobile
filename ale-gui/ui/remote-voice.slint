@@ -49,6 +49,9 @@ export component RemoteVoiceScreen inherits Rectangle {
     in property <string> action-steps: "";
     in property <bool> show-confirmation: false;
     in property <string> confirmation-text: "";
+    in property <string> confirmation-title: "确认执行";
+    in property <string> confirmation-confirm-label: "确认执行";
+    in property <string> confirmation-cancel-label: "取消";
     in property <string> recording-time: "00:00 / 01:00";
     in property <bool> show-settings-action: false;
 
@@ -432,7 +435,7 @@ export component RemoteVoiceScreen inherits Rectangle {
                         alignment: center;
 
                         Text {
-                            text: "确认执行";
+                            text: root.confirmation-title;
                             font-size: 20px;
                             font-weight: 600;
                             color: Palette.foreground;
@@ -461,14 +464,14 @@ export component RemoteVoiceScreen inherits Rectangle {
                     Button {
                         horizontal-stretch: 1;
                         height: 46px;
-                        text: "取消";
+                        text: root.confirmation-cancel-label;
                         clicked => { root.cancel-action(); }
                     }
 
                     Button {
                         horizontal-stretch: 1;
                         height: 46px;
-                        text: "确认执行";
+                        text: root.confirmation-confirm-label;
                         primary: true;
                         clicked => { root.confirm-action(); }
                     }

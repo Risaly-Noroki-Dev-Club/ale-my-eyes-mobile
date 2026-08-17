@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 static ANDROID_APP: Mutex<Option<slint::android::AndroidApp>> = Mutex::new(None);
 static REQUESTED_PERMISSIONS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
+static ANDROID_TTS: Mutex<Option<jni::objects::GlobalRef>> = Mutex::new(None);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PermissionState {
@@ -69,6 +70,91 @@ pub(crate) fn open_app_settings() -> Result<(), String> {
     receiver
         .recv_timeout(Duration::from_secs(2))
         .map_err(|_| "打开系统设置超时".to_string())?
+}
+
+pub(crate) fn initialize_tts() -> Result<(), String> {
+    let app = current_app()?;
+    let request_app = app.clone();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_java_main_thread(Box::new(move || {
+        let result = create_tts_on_main_thread(&request_app);
+        let _ = sender.send(result);
+    }));
+    let tts = receiver
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "初始化 Android TTS 超时".to_string())??;
+    *ANDROID_TTS
+        .lock()
+        .map_err(|_| "无法保存 Android TTS 状态".to_string())? = Some(tts);
+    Ok(())
+}
+
+pub(crate) fn speak(text: &str, interrupt: bool) -> Result<(), String> {
+    if text.trim().is_empty() {
+        return Ok(());
+    }
+    let app = current_app()?;
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }
+        .map_err(|error| format!("无法访问 Android TTS: {error}"))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|error| format!("无法调用 Android TTS: {error}"))?;
+    let guard = ANDROID_TTS
+        .lock()
+        .map_err(|_| "无法访问 Android TTS 状态".to_string())?;
+    let tts = guard
+        .as_ref()
+        .ok_or_else(|| "Android TTS 尚未初始化".to_string())?;
+    let speech = env
+        .new_string(text)
+        .map_err(|error| format!("无法创建播报文本: {error}"))?;
+    let utterance_id = env
+        .new_string(format!("ale-{}", uuid::Uuid::new_v4()))
+        .map_err(|error| format!("无法创建播报 ID: {error}"))?;
+    let bundle = jni::objects::JObject::null();
+    let queue_mode = if interrupt { 0 } else { 1 };
+    let status = env
+        .call_method(
+            tts.as_obj(),
+            "speak",
+            "(Ljava/lang/CharSequence;ILandroid/os/Bundle;Ljava/lang/String;)I",
+            &[
+                jni::objects::JValue::Object(&speech),
+                jni::objects::JValue::Int(queue_mode),
+                jni::objects::JValue::Object(&bundle),
+                jni::objects::JValue::Object(&utterance_id),
+            ],
+        )
+        .and_then(|value| value.i())
+        .map_err(|error| {
+            clear_pending_exception(&mut env);
+            format!("Android TTS 播报失败: {error}")
+        })?;
+    if status == 0 {
+        Ok(())
+    } else {
+        Err("Android TTS 尚未准备完成".to_string())
+    }
+}
+
+pub(crate) fn stop_tts() {
+    let Ok(app) = current_app() else {
+        return;
+    };
+    let Ok(vm) = (unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }) else {
+        return;
+    };
+    let Ok(mut env) = vm.attach_current_thread() else {
+        return;
+    };
+    let Ok(guard) = ANDROID_TTS.lock() else {
+        return;
+    };
+    if let Some(tts) = guard.as_ref() {
+        if env.call_method(tts.as_obj(), "stop", "()I", &[]).is_err() {
+            clear_pending_exception(&mut env);
+        }
+    }
 }
 
 async fn ensure_permission(
@@ -265,7 +351,38 @@ fn open_settings_on_main_thread(app: &slint::android::AndroidApp) -> Result<(), 
     Ok(())
 }
 
+fn create_tts_on_main_thread(
+    app: &slint::android::AndroidApp,
+) -> Result<jni::objects::GlobalRef, String> {
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }
+        .map_err(|error| format!("无法访问 Android TTS: {error}"))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|error| format!("无法初始化 Android TTS: {error}"))?;
+    let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+    let listener = jni::objects::JObject::null();
+    let tts = env
+        .new_object(
+            "android/speech/tts/TextToSpeech",
+            "(Landroid/content/Context;Landroid/speech/tts/TextToSpeech$OnInitListener;)V",
+            &[
+                jni::objects::JValue::Object(&activity),
+                jni::objects::JValue::Object(&listener),
+            ],
+        )
+        .map_err(|error| {
+            clear_pending_exception(&mut env);
+            format!("无法创建 Android TTS: {error}")
+        })?;
+    env.new_global_ref(tts)
+        .map_err(|error| format!("无法保存 Android TTS: {error}"))
+}
+
 fn clear_android_app() {
+    stop_tts();
+    if let Ok(mut tts) = ANDROID_TTS.lock() {
+        tts.take();
+    }
     if let Ok(mut current_app) = ANDROID_APP.lock() {
         current_app.take();
     }

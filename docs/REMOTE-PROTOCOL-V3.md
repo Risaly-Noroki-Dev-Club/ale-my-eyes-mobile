@@ -1,8 +1,8 @@
-# Remote Protocol v2
+# Remote Protocol v3
 
 ## Status
 
-This document is the required desktop-side contract for Android `0.3.0`. Version 2 is intentionally incompatible with v1. A client or server receiving another version must close the WebSocket and must not fall back.
+This document is the required desktop-side contract for Android `0.3.0`. Version 3 is intentionally incompatible with older versions. A client or server receiving another version must close the WebSocket and must not fall back.
 
 ## Transport and pairing
 
@@ -51,6 +51,10 @@ Every complete, optionally reassembled payload is one JSON object with a snake-c
 | `audio_chunk` | client to server | `request_id`, `sequence: u32`, `pcm_base64: string` |
 | `audio_end` | client to server | `request_id`, `chunk_count: u32`, `total_frames: u64`, `sha256: lowercase hex string` |
 | `cancel_request` | client to server | `request_id` |
+| `progress_update` | server to client | `request_id`, `stage`, `message` |
+| `decision_request` | server to client | `request_id`, `decision_id`, `kind`, `prompt`, `expires_in_seconds` |
+| `decision_response` | client to server | `request_id`, `decision_id`, `approved: bool` |
+| `assistant_output` | server to client | optional `request_id`, `kind`, `display_text`, `speech_text`, `interrupt`, `sensitive` |
 | `command_preview` | server to client | `request_id`, `response_text`, `action_steps: string[]`, `confirmation_text`, `requires_confirmation: bool`, `has_plan: bool` |
 | `confirm_execution` | client to server | `request_id`, `approved: bool` |
 | `execution_status` | server to client | `request_id`, `state`, `message`, `actions_executed: integer` |
@@ -59,6 +63,10 @@ Every complete, optionally reassembled payload is one JSON object with a snake-c
 | `error` | either | `request_id: string or null`, `code: string`, `message: string` |
 
 `execution_status.state` is one of `preview_ready`, `executing`, `completed`, `failed`, or `cancelled`.
+
+`decision_request.kind` is one of `use_remote_model`, `upload_full_screenshot`, or `risk_changed`. Android must retain visible yes/no controls until it responds, the request expires, or the session disconnects. Voice yes/no may be transcribed only by the desktop SenseVoice path; if that path is unavailable, the buttons remain mandatory and cloud ASR is not used for the decision.
+
+`assistant_output.speech_text` is a separately sanitized value for Android system TTS. Passwords, keys, complete typed text, and sensitive paths must not appear in it. Confirmation and error output may interrupt ordinary speech; progress output is coalesced. Starting recording or disconnecting clears the speech and decision queues.
 
 Example audio start:
 
@@ -109,7 +117,7 @@ The following codes are protocol-stable:
 
 | Code | Meaning |
 | --- | --- |
-| `PROTOCOL_INCOMPATIBLE` | Peer is not protocol v2 |
+| `PROTOCOL_INCOMPATIBLE` | Peer is not protocol v3 |
 | `REQUEST_TIMEOUT` | Preview was not produced before its deadline |
 | `CONFIRM_TIMEOUT` | Execution status was not produced before its deadline |
 | `AUDIO_TOO_LARGE` | Audio exceeds the 60-second or byte limit |
@@ -126,7 +134,7 @@ Implementations may also use `UNSUPPORTED_AUDIO_FORMAT`, `INVALID_AUDIO_CHUNK`, 
 Run the host mock server with:
 
 ```bash
-cargo run -p ale-core --features mock-server --example mock_remote_v2
+cargo run -p ale-core --features mock-server --example mock_remote_v3
 ```
 
-It prints a pairing URI and validates v2 audio ordering, size, length, and hash before returning deterministic previews and execution status. It performs no ASR or automation.
+It prints a pairing URI and validates v3 audio ordering, size, length, and hash before returning deterministic decisions, previews, and execution status. It performs no ASR or automation.
