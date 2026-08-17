@@ -49,6 +49,8 @@ export component RemoteVoiceScreen inherits Rectangle {
     in property <string> action-steps: "";
     in property <bool> show-confirmation: false;
     in property <string> confirmation-text: "";
+    in property <string> recording-time: "00:00 / 01:00";
+    in property <bool> show-settings-action: false;
 
     callback scan();
     callback cancel-scan();
@@ -56,6 +58,8 @@ export component RemoteVoiceScreen inherits Rectangle {
     callback disconnect();
     callback confirm-action();
     callback cancel-action();
+    callback cancel-request();
+    callback open-settings();
 
     private property <bool> compact-height: root.height < 620px;
     private property <length> page-padding: root.width < 380px ? 16px : root.width < 600px ? 24px : 32px;
@@ -319,6 +323,13 @@ export component RemoteVoiceScreen inherits Rectangle {
                                 font-weight: 600;
                                 color: Palette.foreground;
                             }
+
+                            Rectangle { horizontal-stretch: 1; }
+
+                            Button {
+                                text: "取消";
+                                clicked => { root.cancel-request(); }
+                            }
                         }
 
                         if !root.busy && root.response-text == "" : Text {
@@ -327,6 +338,15 @@ export component RemoteVoiceScreen inherits Rectangle {
                             font-size: 22px;
                             font-weight: 600;
                             color: Palette.foreground;
+                            horizontal-alignment: center;
+                        }
+
+                        if root.recording : Text {
+                            vertical-stretch: 0;
+                            text: root.recording-time;
+                            font-size: 16px;
+                            font-weight: 600;
+                            color: root.success-foreground;
                             horizontal-alignment: center;
                         }
 
@@ -366,6 +386,13 @@ export component RemoteVoiceScreen inherits Rectangle {
                     primary: true;
                     enabled: !root.busy;
                     clicked => { root.toggle-recording(); }
+                }
+
+                if root.show-settings-action : Button {
+                    horizontal-stretch: 1;
+                    height: 46px;
+                    text: "打开系统设置";
+                    clicked => { root.open-settings(); }
                 }
             }
         }

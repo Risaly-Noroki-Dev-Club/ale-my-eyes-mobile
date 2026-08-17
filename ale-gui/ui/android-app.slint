@@ -17,6 +17,8 @@ export component AppWindow inherits Window {
     in-out property <string> action-steps: "";
     in-out property <bool> show-confirmation: false;
     in-out property <string> confirmation-text: "";
+    in-out property <string> recording-time: "00:00 / 01:00";
+    in-out property <bool> show-settings-action: false;
 
     callback scan-remote();
     callback cancel-remote-scan();
@@ -24,6 +26,8 @@ export component AppWindow inherits Window {
     callback disconnect-remote();
     callback confirm-action();
     callback cancel-action();
+    callback cancel-request();
+    callback open-app-settings();
 
     RemoteVoiceScreen {
         x: root.safe-area-insets.left;
@@ -40,6 +44,8 @@ export component AppWindow inherits Window {
         action-steps: root.action-steps;
         show-confirmation: root.show-confirmation;
         confirmation-text: root.confirmation-text;
+        recording-time: root.recording-time;
+        show-settings-action: root.show-settings-action;
 
         scan => { root.scan-remote(); }
         cancel-scan => { root.cancel-remote-scan(); }
@@ -47,5 +53,7 @@ export component AppWindow inherits Window {
         disconnect => { root.disconnect-remote(); }
         confirm-action => { root.confirm-action(); }
         cancel-action => { root.cancel-action(); }
+        cancel-request => { root.cancel-request(); }
+        open-settings => { root.open-app-settings(); }
     }
 }

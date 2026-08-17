@@ -1,25 +1,28 @@
 use crate::AppWindow;
 use slint::ComponentHandle;
 use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 static ANDROID_APP: Mutex<Option<slint::android::AndroidApp>> = Mutex::new(None);
+static REQUESTED_PERMISSIONS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 
-/// Android 入口点 — Slint + android-activity 后端。
-///
-/// Android 客户端现在只作为局域网指令入口，不启动本机自动化、相机或前台服务。
-#[cfg(target_os = "android")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PermissionState {
+    Granted,
+    Denied,
+    PermanentlyDenied,
+}
+
 #[unsafe(no_mangle)]
 fn android_main(app: slint::android::AndroidApp) {
     if let Ok(mut current_app) = ANDROID_APP.lock() {
         *current_app = Some(app.clone());
     }
-
     if let Err(error) = slint::android::init(app) {
         tracing::error!("Failed to initialize Slint Android backend: {}", error);
         clear_android_app();
         return;
     }
-
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -32,8 +35,6 @@ fn android_main(app: slint::android::AndroidApp) {
         }
     };
     let _runtime_guard = runtime.enter();
-
-    // 1. 创建主窗口。权限只在用户触发对应功能时请求。
     let window = match AppWindow::new() {
         Ok(window) => window,
         Err(error) => {
@@ -42,43 +43,92 @@ fn android_main(app: slint::android::AndroidApp) {
             return;
         }
     };
-
-    // 2. 初始化 Android 遥控端逻辑。
     crate::setup_app(&window);
-
-    // 3. 运行事件循环（阻塞直到 Activity 销毁）
     if let Err(error) = window.run() {
         tracing::error!("Android app exited with error: {}", error);
     }
-
     clear_android_app();
-    tracing::info!("Android app shutdown complete");
 }
 
-fn clear_android_app() {
-    if let Ok(mut current_app) = ANDROID_APP.lock() {
-        current_app.take();
+pub(crate) async fn ensure_camera_permission() -> Result<PermissionState, String> {
+    ensure_permission("android.permission.CAMERA", 1002).await
+}
+
+pub(crate) async fn ensure_microphone_permission() -> Result<PermissionState, String> {
+    ensure_permission("android.permission.RECORD_AUDIO", 1003).await
+}
+
+pub(crate) fn open_app_settings() -> Result<(), String> {
+    let app = current_app()?;
+    let request_app = app.clone();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_java_main_thread(Box::new(move || {
+        let result = open_settings_on_main_thread(&request_app);
+        let _ = sender.send(result);
+    }));
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "打开系统设置超时".to_string())?
+}
+
+async fn ensure_permission(
+    permission_name: &'static str,
+    request_code: i32,
+) -> Result<PermissionState, String> {
+    let app = current_app()?;
+    if check_permission(&app, permission_name)? {
+        return Ok(PermissionState::Granted);
+    }
+    let requested_before = REQUESTED_PERMISSIONS
+        .lock()
+        .map_err(|_| "无法读取权限状态".to_string())?
+        .contains(&permission_name);
+    if requested_before && !should_show_rationale(&app, permission_name)? {
+        return Ok(PermissionState::PermanentlyDenied);
+    }
+    if let Ok(mut requested) = REQUESTED_PERMISSIONS.lock() {
+        if !requested.contains(&permission_name) {
+            requested.push(permission_name);
+        }
+    }
+
+    let request_app = app.clone();
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    app.run_on_java_main_thread(Box::new(move || {
+        let result = request_permission(&request_app, permission_name, request_code);
+        let _ = sender.send(result);
+    }));
+    receiver
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "Android 权限请求超时".to_string())??;
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if check_permission(&app, permission_name)? {
+            return Ok(PermissionState::Granted);
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    if !requested_before || should_show_rationale(&app, permission_name)? {
+        Ok(PermissionState::Denied)
+    } else {
+        Ok(PermissionState::PermanentlyDenied)
     }
 }
 
-/// Returns true when the camera can be opened. If permission is missing, this
-/// requests it and lets the caller ask the user to tap Scan again afterwards.
-pub(crate) fn ensure_camera_permission() -> Result<bool, String> {
-    ensure_permission("android.permission.CAMERA", 1002)
-}
-
-pub(crate) fn ensure_microphone_permission() -> Result<bool, String> {
-    ensure_permission("android.permission.RECORD_AUDIO", 1003)
-}
-
-fn ensure_permission(permission_name: &str, request_code: i32) -> Result<bool, String> {
-    use jni::objects::JValue;
-
-    let app = ANDROID_APP
+fn current_app() -> Result<slint::android::AndroidApp, String> {
+    ANDROID_APP
         .lock()
         .map_err(|_| "无法访问 Android Activity".to_string())?
         .clone()
-        .ok_or_else(|| "Android Activity 尚未就绪".to_string())?;
+        .ok_or_else(|| "Android Activity 尚未就绪".to_string())
+}
+
+fn check_permission(
+    app: &slint::android::AndroidApp,
+    permission_name: &str,
+) -> Result<bool, String> {
+    use jni::objects::JValue;
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }
         .map_err(|error| format!("无法访问 Android 权限服务: {error}"))?;
     let mut env = vm
@@ -88,37 +138,45 @@ fn ensure_permission(permission_name: &str, request_code: i32) -> Result<bool, S
     let permission = env
         .new_string(permission_name)
         .map_err(|error| format!("无法创建权限请求: {error}"))?;
-    let granted = match env
-        .call_method(
-            &activity,
-            "checkSelfPermission",
-            "(Ljava/lang/String;)I",
-            &[JValue::Object(&permission)],
-        )
-        .and_then(|value| value.i())
-    {
-        Ok(value) => value == 0,
-        Err(error) => {
-            clear_pending_exception(&mut env);
-            return Err(format!("无法检查权限: {error}"));
-        }
-    };
-    if granted {
-        return Ok(true);
-    }
+    env.call_method(
+        &activity,
+        "checkSelfPermission",
+        "(Ljava/lang/String;)I",
+        &[JValue::Object(&permission)],
+    )
+    .and_then(|value| value.i())
+    .map(|value| value == 0)
+    .map_err(|error| {
+        clear_pending_exception(&mut env);
+        format!("无法检查权限: {error}")
+    })
+}
 
-    drop(env);
-    let permission_name = permission_name.to_owned();
-    let request_app = app.clone();
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    app.run_on_java_main_thread(Box::new(move || {
-        let result = request_permission(&request_app, &permission_name, request_code);
-        let _ = sender.send(result);
-    }));
-    receiver
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .map_err(|_| "Android 权限请求超时".to_string())??;
-    Ok(false)
+fn should_show_rationale(
+    app: &slint::android::AndroidApp,
+    permission_name: &str,
+) -> Result<bool, String> {
+    use jni::objects::JValue;
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }
+        .map_err(|error| format!("无法访问 Android 权限服务: {error}"))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|error| format!("无法读取权限状态: {error}"))?;
+    let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+    let permission = env
+        .new_string(permission_name)
+        .map_err(|error| format!("无法创建权限名称: {error}"))?;
+    env.call_method(
+        &activity,
+        "shouldShowRequestPermissionRationale",
+        "(Ljava/lang/String;)Z",
+        &[JValue::Object(&permission)],
+    )
+    .and_then(|value| value.z())
+    .map_err(|error| {
+        clear_pending_exception(&mut env);
+        format!("无法读取权限状态: {error}")
+    })
 }
 
 fn request_permission(
@@ -127,7 +185,6 @@ fn request_permission(
     request_code: i32,
 ) -> Result<(), String> {
     use jni::objects::JValue;
-
     let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }
         .map_err(|error| format!("无法访问 Android 权限服务: {error}"))?;
     let mut env = vm
@@ -153,6 +210,65 @@ fn request_permission(
         format!("无法请求权限: {error}")
     })?;
     Ok(())
+}
+
+fn open_settings_on_main_thread(app: &slint::android::AndroidApp) -> Result<(), String> {
+    use jni::objects::{JObject, JValue};
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }
+        .map_err(|error| format!("无法访问 Android 设置: {error}"))?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|error| format!("无法打开 Android 设置: {error}"))?;
+    let activity = unsafe { JObject::from_raw(app.activity_as_ptr().cast()) };
+    let action = env
+        .new_string("android.settings.APPLICATION_DETAILS_SETTINGS")
+        .map_err(|error| error.to_string())?;
+    let intent_class = env
+        .find_class("android/content/Intent")
+        .map_err(|error| error.to_string())?;
+    let intent = env
+        .new_object(
+            &intent_class,
+            "(Ljava/lang/String;)V",
+            &[JValue::Object(&action)],
+        )
+        .map_err(|error| error.to_string())?;
+    let uri_class = env
+        .find_class("android/net/Uri")
+        .map_err(|error| error.to_string())?;
+    let uri_text = env
+        .new_string("package:com.alemyeyes")
+        .map_err(|error| error.to_string())?;
+    let uri = env
+        .call_static_method(
+            &uri_class,
+            "parse",
+            "(Ljava/lang/String;)Landroid/net/Uri;",
+            &[JValue::Object(&uri_text)],
+        )
+        .and_then(|value| value.l())
+        .map_err(|error| error.to_string())?;
+    env.call_method(
+        &intent,
+        "setData",
+        "(Landroid/net/Uri;)Landroid/content/Intent;",
+        &[JValue::Object(&uri)],
+    )
+    .map_err(|error| error.to_string())?;
+    env.call_method(
+        &activity,
+        "startActivity",
+        "(Landroid/content/Intent;)V",
+        &[JValue::Object(&intent)],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn clear_android_app() {
+    if let Ok(mut current_app) = ANDROID_APP.lock() {
+        current_app.take();
+    }
 }
 
 fn clear_pending_exception(env: &mut jni::JNIEnv<'_>) {

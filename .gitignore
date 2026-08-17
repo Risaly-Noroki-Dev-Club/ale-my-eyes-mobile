@@ -25,6 +25,7 @@ Thumbs.db
 /ale-my-eyes-android.zip
 /ale-my-eyes-android.tar.gz
 ale-gui/android/build/
+/test-artifacts/
 
 # Models
 models/downloaded/

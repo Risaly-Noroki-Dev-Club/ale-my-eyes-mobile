@@ -9,6 +9,7 @@ NC="\033[0m"
 
 DEFAULT_NDK_VERSION="27.3.13750724"
 DEFAULT_TARGETS="aarch64-linux-android"
+CARGO_APK_VERSION="0.10.0"
 PACKAGE_DIR="ale-my-eyes-android"
 
 log_info() {
@@ -140,9 +141,9 @@ ensure_signing_tools() {
 }
 
 ensure_cargo_apk() {
-    if ! cargo apk --help >/dev/null 2>&1; then
-        log_info "安装 cargo-apk..."
-        cargo install cargo-apk
+    if ! cargo install --list | grep -F "cargo-apk v${CARGO_APK_VERSION}:" >/dev/null; then
+        log_info "安装 cargo-apk ${CARGO_APK_VERSION}..."
+        cargo install cargo-apk --version "$CARGO_APK_VERSION" --locked
     fi
 }
 
@@ -265,6 +266,7 @@ build_target() {
 
     apk_path=$(locate_apk_for_target "$target")
     cp "$apk_path" "$PACKAGE_DIR/$output_name"
+    ./scripts/verify-android-apk.sh "$PACKAGE_DIR/$output_name"
     log_info "已生成: $PACKAGE_DIR/$output_name"
 }
 
@@ -325,6 +327,10 @@ main() {
     ensure_cargo_apk
 
     read -r -a BUILD_TARGETS <<< "${ANDROID_BUILD_TARGETS:-$DEFAULT_TARGETS}"
+    if [ "${#BUILD_TARGETS[@]}" -ne 1 ] || [ "${BUILD_TARGETS[0]}" != "$DEFAULT_TARGETS" ]; then
+        log_error "正式产物仅允许 target: $DEFAULT_TARGETS"
+        exit 1
+    fi
     log_info "添加 Android Rust targets..."
     rustup target add "${BUILD_TARGETS[@]}"
 
