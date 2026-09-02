@@ -1,43 +1,74 @@
 # Ale, My Eyes! Android
 
-This repository contains the Android arm64 LAN command client. It scans a QR code shown by a desktop, opens one encrypted Noise-over-WebSocket session, streams mono PCM16 audio, displays progress and explicit decisions, and sends the user's confirmation or rejection.
+> **Beta** — AME的第一个公开版本自此开始。
 
-The app does not run ASR, language or vision models, memory, or desktop automation locally. Android system `TextToSpeech` plays the desktop-provided, separately redacted `speech_text`; recording and disconnect stop the speech queue. The app has no source or Cargo dependency on the independent desktop repository.
+## 什么是AME
 
-## Compatibility and security
+Ale, My Eyes! 是你口袋里的另一位伙伴。我们期待可以帮到你。
 
-- Android arm64 (`arm64-v8a`) only, minimum API 26.
-- Remote protocol v3 only. Older desktops are rejected without fallback.
-- The desktop and Android device must be reachable over the same LAN.
-- Pairing is memory-only. Every app start or disconnect requires a new QR scan.
-- The six-digit pairing code is never persisted.
-- No automatic reconnect and no automatic command replay.
+这个 Android 应用本身不运行人工智能模型。相反，它通过手机收集你的声音，安全地传给你的电脑，再把电脑的回应读给你听。
 
-Version `0.3.0` must not be released for general use until the desktop and Android client pass the [remote protocol v3](docs/REMOTE-PROTOCOL-V3.md) acceptance matrix.
+## 它是怎么工作的
 
-## Development
+你说话，ame借助whisper理解你在说什么，然后AME透过自带的本地模型理解屏幕上发生了什么，丢给那一群数据中心里面的神秘概率机器，把所有应该实现的东西丢到本地之后一个专门的控屏模型会帮你做完，然后啪！你知道大功告成了（当然实际上并不会炸）
+
+## 此刻它能做什么（Beta 版）
+
+- **语音对话**：说点什么吧
+- **屏幕理解**：让电脑理解屏幕并描述上面的内容。
+- **安全确认**：“完全访问”是个谎言！
+- **隐私优先**：所有通信都在本地网络内完成，端到端加密，配对码每次重新生成，从不保存。（我也不知道你说了什么！）
+
+## 兼容性
+
+- Android 8.0（API 26）及以上
+- 仅支持 arm64 设备（抱歉了所有的模拟器用户）
+- 需要与桌面端处于同一局域网
+- 仅支持远程协议 v3（旧版本桌面端将被拒绝连接）
+
+## 开发
 
 ```bash
+# 检查代码格式
 cargo fmt --all -- --check
+
+# 运行核心测试
 cargo test -p ale-core
+
+# 检查主机端代码
 cargo check --workspace
+
+# 检查 Android 客户端（需要 Android NDK）
 cargo check -p ale-gui --target aarch64-linux-android --lib
 ```
 
-The Android target check requires the Rust `aarch64-linux-android` target and an Android NDK. A host workspace check does not compile the Android platform code.
-
-Build and verify the signed arm64 APK:
+构建并验证签名 APK：
 
 ```bash
 ./scripts/package-android.sh
 ```
 
-The output directory contains `ale-my-eyes-arm64.apk` and `SHA256SUMS`. Without release signing environment variables, the script creates a temporary test keystore; that artifact is not a production release.
-
-Run local lifecycle smoke tests against the configured Pixel 7 Pro API 34 and Pixel Tablet API 35 arm64 AVDs:
+AVD 烟雾测试：
 
 ```bash
 ./scripts/smoke-android-avds.sh ale-my-eyes-android/ale-my-eyes-arm64.apk
 ```
 
-See [Android architecture](docs/ARCHITECTURE.md), [release checklist](docs/ANDROID-RELEASE-CHECKLIST.md), and [remediation status](docs/ANDROID-ISSUES.md).
+## 文档
+
+- [Android 架构](docs/ARCHITECTURE.md)
+- [远程协议 v3](docs/REMOTE-PROTOCOL-V3.md)
+- [发布检查清单](docs/ANDROID-RELEASE-CHECKLIST.md)
+- [已知问题](docs/ANDROID-ISSUES.md)
+
+## 致未来的使用者
+
+我们知道，依赖技术来感知世界是一件需要信任的事。我们不敢说自己已经完美，但我们可以承诺：每一个设计决策背后，都站着一个真正需要它的人。
+
+如果你正在使用这个应用，谢谢你愿意给我们一个机会。
+
+感谢所有人的耐心等待和支持。
+
+---
+
+*Ale, My Eyes! 是一个独立的开源项目，与任何商业助盲服务无关。当然和AMA-10也是如此。*
