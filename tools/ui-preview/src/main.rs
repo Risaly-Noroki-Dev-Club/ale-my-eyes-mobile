@@ -4,6 +4,12 @@ use slint::{ComponentHandle, PhysicalSize, Rgb8Pixel, SharedPixelBuffer};
 use std::rc::Rc;
 slint::include_modules!();
 
+#[path = "../../../ale-gui/src/camera_frame.rs"]
+#[cfg(test)]
+mod camera_frame;
+#[cfg(test)]
+mod scan_tests;
+
 #[path = "../../../ale-gui/src/operation_epoch.rs"]
 #[cfg(test)]
 mod operation_epoch;
@@ -11,7 +17,7 @@ mod operation_epoch;
 #[cfg(test)]
 mod preferences;
 
-struct Platform(Rc<MinimalSoftwareWindow>);
+struct Platform(Rc<MinimalSoftwareWindow>, std::time::Instant);
 impl slint::platform::Platform for Platform {
     fn create_window_adapter(
         &self,
@@ -19,7 +25,7 @@ impl slint::platform::Platform for Platform {
         Ok(self.0.clone())
     }
     fn duration_since_start(&self) -> std::time::Duration {
-        std::time::Duration::ZERO
+        self.1.elapsed()
     }
 }
 
@@ -29,9 +35,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or_else(|| "target/ui-preview".into());
     std::fs::create_dir_all(&output)?;
     let window = MinimalSoftwareWindow::new(RepaintBufferType::NewBuffer);
-    slint::platform::set_platform(Box::new(Platform(window.clone())))?;
+    slint::platform::set_platform(Box::new(Platform(
+        window.clone(),
+        std::time::Instant::now(),
+    )))?;
     let app = AppWindow::new()?;
-    app.set_app_version("0.3.0".into());
+    app.set_app_version("0.3.0 · rear-roi-3".into());
+    app.set_camera_label("后置相机 · 1×（系统多摄）".into());
+    // Synthetic color chart, not camera runtime evidence.
+    let mut camera_chart = SharedPixelBuffer::<Rgb8Pixel>::new(640, 960);
+    for (i, pixel) in camera_chart.make_mut_slice().iter_mut().enumerate() {
+        let x = i % 640;
+        let y = i / 640;
+        *pixel = Rgb8Pixel::new(
+            (x * 255 / 640) as u8,
+            (y * 255 / 960) as u8,
+            if (x / 80 + y / 80) % 2 == 0 { 180 } else { 60 },
+        );
+    }
+    app.set_remote_scan_preview(slint::Image::from_rgb8(camera_chart));
     app.set_protocol_version("ale-my-eyes v3".into());
     app.set_device_name("桌面工作站".into());
     app.set_device_address("192.168.1.20:7380".into());
@@ -98,6 +120,91 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "system Back must reach the application while a modal is open"
     );
     app.set_show_confirmation(false);
+    // A screenshot alone cannot detect a ScrollView with drag panning disabled.
+    // Use overflowing production settings and drag the content, not its scrollbar.
+    for (case, width, height, font_scale, density, start_x, start_y) in [
+        ("large-text", 402, 874, 2.0, 1.0, 200.0, 550.0),
+        ("small-phone", 360, 640, 1.0, 1.0, 180.0, 400.0),
+        ("switch-row", 360, 640, 1.0, 1.0, 300.0, 200.0),
+        ("dense-phone", 360, 640, 1.0, 3.0, 180.0, 400.0),
+        ("landscape", 874, 402, 1.0, 1.0, 437.0, 240.0),
+    ] {
+        window.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged {
+            scale_factor: density,
+        });
+        let physical_width = (width as f32 * density) as u32;
+        let physical_height = (height as f32 * density) as u32;
+        window.set_size(PhysicalSize::new(physical_width, physical_height));
+        app.set_current_page(MobilePage::Scan);
+        slint::platform::update_timers_and_animations();
+        window.request_redraw();
+        let mut reset = SharedPixelBuffer::<Rgb8Pixel>::new(physical_width, physical_height);
+        window.draw_if_needed(|renderer| {
+            renderer.render(reset.make_mut_slice(), physical_width as usize);
+        });
+        app.set_current_page(MobilePage::Settings);
+        app.set_font_scale(font_scale);
+        let preferences = Rc::new(std::cell::Cell::new(0));
+        let observed = preferences.clone();
+        app.on_change_preference(move |_, _| observed.set(observed.get() + 1));
+        let render = || {
+            slint::platform::update_timers_and_animations();
+            window.request_redraw();
+            let mut pixels = SharedPixelBuffer::<Rgb8Pixel>::new(physical_width, physical_height);
+            window.draw_if_needed(|renderer| {
+                renderer.render(pixels.make_mut_slice(), physical_width as usize);
+            });
+            pixels
+        };
+        let before = render();
+        let start = slint::LogicalPosition::new(start_x, start_y);
+        let touch = |x, y, phase| {
+            i_slint_core::window::WindowInner::from_pub(app.window()).process_touch_input(
+                0,
+                i_slint_core::lengths::LogicalPoint::new(x, y),
+                phase,
+            );
+        };
+        use i_slint_core::input::TouchPhase;
+        touch(start.x, start.y, TouchPhase::Started);
+        for step in 1..=12 {
+            std::thread::sleep(std::time::Duration::from_millis(16));
+            touch(start_x, start_y - step as f32 * 12.0, TouchPhase::Moved);
+            render();
+        }
+        touch(start_x, start_y - 144.0, TouchPhase::Ended);
+        let after = render();
+        let content_end = ((height as f32 - 110.0) * density) as usize;
+        let stride = physical_width as usize;
+        let changed = (30..content_end)
+            .flat_map(|y| (20..stride - 20).map(move |x| (y * stride + x) * 3))
+            .filter(|&i| before.as_bytes()[i..i + 3] != after.as_bytes()[i..i + 3])
+            .count();
+        assert!(
+            changed > 1000,
+            "{case}: dragging settings must move its content; changed {changed} pixels"
+        );
+        assert_eq!(
+            preferences.get(),
+            0,
+            "scrolling must not change preferences"
+        );
+        assert_eq!(
+            &before.as_bytes()[((height as f32 - 60.0) * density) as usize * stride * 3..],
+            &after.as_bytes()[((height as f32 - 60.0) * density) as usize * stride * 3..],
+            "bottom navigation must remain fixed while settings scroll"
+        );
+        image::save_buffer(
+            format!("{output}/{case}-settings-scrolled.png"),
+            after.as_bytes(),
+            physical_width,
+            physical_height,
+            image::ColorType::Rgb8,
+        )?;
+        println!("Native touch settings regression passed: {case}");
+    }
+    window.dispatch_event(slint::platform::WindowEvent::ScaleFactorChanged { scale_factor: 1.0 });
+    println!("Production settings drag check passed: content moves, preferences unchanged, navigation fixed.");
     println!("Production UI hit-target checks passed: navigation, recording lock, microphone, modal interception.");
     for (label, size, scale) in [
         ("phone", PhysicalSize::new(402, 874), 1.0),
@@ -110,6 +217,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         app.set_font_scale(scale);
         for (name, page, connected, recording, busy, confirmation) in [
             ("scan", MobilePage::Scan, false, false, false, false),
+            (
+                "camera-preview",
+                MobilePage::Scan,
+                false,
+                false,
+                false,
+                false,
+            ),
             ("paired", MobilePage::Scan, true, false, false, false),
             ("voice", MobilePage::Voice, true, false, false, false),
             ("recording", MobilePage::Voice, true, true, false, false),
@@ -118,6 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ("settings", MobilePage::Settings, true, false, false, false),
         ] {
             app.set_current_page(page);
+            app.set_remote_scanning(name == "camera-preview");
             app.set_remote_connected(connected);
             app.set_voice_recording(recording);
             app.set_is_busy(busy);
@@ -146,6 +262,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )?;
         }
     }
-    println!("Rendered 35 production Slint states to {output}; sample data only, no Android runtime verification.");
+    println!("Rendered 40 production Slint states to {output}; sample data only, no Android runtime verification.");
     Ok(())
 }

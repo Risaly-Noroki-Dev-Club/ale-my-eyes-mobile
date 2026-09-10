@@ -2,6 +2,7 @@
 
 mod android;
 mod audio;
+mod camera_frame;
 mod operation_epoch;
 mod preferences;
 mod qr_scanner;
@@ -55,7 +56,7 @@ impl AppState {
 }
 
 pub fn setup_app(app: &AppWindow) {
-    app.set_app_version(env!("CARGO_PKG_VERSION").into());
+    app.set_app_version(concat!(env!("CARGO_PKG_VERSION"), " · rear-roi-3").into());
     app.set_protocol_version(
         format!("ale-my-eyes v{}", ale_core::remote::REMOTE_PROTOCOL_VERSION).into(),
     );
@@ -332,26 +333,61 @@ fn start_qr_scan(
     app.set_is_busy(true);
     app.set_remote_connected(false);
     app.set_remote_scanning(true);
+    app.set_remote_scan_preview(slint::Image::default());
+    app.set_camera_label("正在打开后置相机…".into());
     app.set_remote_status("将电脑上的 v3 二维码放入框内".into());
+    let region = Arc::new(std::sync::Mutex::new(camera_frame::ScanRegion::default()));
+    let layout_region = region.clone();
+    app.on_scan_geometry_changed(move |width, height, size| {
+        if let Ok(mut region) = layout_region.lock() {
+            region.view_width = width;
+            region.view_height = height;
+            region.box_size = size;
+        }
+    });
 
     std::thread::spawn(move || {
         let preview_app = app_weak.clone();
         let scan_token = cancelled.clone();
         let preview_token = cancelled.clone();
-        let scan_result = qr_scanner::scan_pairing_info(cancelled, move |gray, width, height| {
-            let token = preview_token.clone();
-            let _ = preview_app.upgrade_in_event_loop(move |app| {
-                if token.load(Ordering::Acquire) {
-                    return;
-                }
-                let mut pixels =
-                    slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(width as u32, height as u32);
-                for (pixel, value) in pixels.make_mut_slice().iter_mut().zip(gray) {
-                    *pixel = slint::Rgb8Pixel::new(value, value, value);
-                }
-                app.set_remote_scan_preview(slint::Image::from_rgb8(pixels));
-            });
-        });
+        let preview_region = region.clone();
+        let label_app = app_weak.clone();
+        let label_token = cancelled.clone();
+        let scan_result = qr_scanner::scan_pairing_info(
+            cancelled,
+            region,
+            move |label| {
+                let token = label_token.clone();
+                let _ = label_app.upgrade_in_event_loop(move |app| {
+                    if !token.load(Ordering::Acquire) {
+                        app.set_camera_label(label.into());
+                    }
+                });
+            },
+            move |rgb, width, height, rotation| {
+                let token = preview_token.clone();
+                let region = preview_region.clone();
+                let _ = preview_app.upgrade_in_event_loop(move |app| {
+                    if token.load(Ordering::Acquire) {
+                        return;
+                    }
+                    let mut pixels = slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(
+                        width as u32,
+                        height as u32,
+                    );
+                    pixels.make_mut_bytes().copy_from_slice(&rgb);
+                    app.set_remote_scan_preview(slint::Image::from_rgb8(pixels));
+                    if let Ok(mut region) = region.lock() {
+                        *region = camera_frame::ScanRegion {
+                            view_width: app.get_scan_view_width(),
+                            view_height: app.get_scan_view_height(),
+                            box_size: app.get_scan_box_size(),
+                            rotation,
+                        };
+                    }
+                });
+            },
+        );
         let should_publish = qr_scan_cancel.lock().is_ok_and(|slot| {
             if slot
                 .as_ref()

@@ -10,6 +10,14 @@ thread_local! {
     static WINDOW: std::cell::RefCell<Option<slint::Weak<AppWindow>>> = const { std::cell::RefCell::new(None) };
 }
 static FOREGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+static PERMISSION_DIALOGS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+struct PermissionDialog;
+impl Drop for PermissionDialog {
+    fn drop(&mut self) {
+        PERMISSION_DIALOGS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
 
 pub(crate) fn is_foreground() -> bool {
     FOREGROUND.load(std::sync::atomic::Ordering::Acquire)
@@ -31,6 +39,18 @@ fn android_main(app: slint::android::AndroidApp) {
         use slint::android::android_activity::{MainEvent, PollEvent};
         match event {
             PollEvent::Main(MainEvent::Pause) => {
+                FOREGROUND.store(false, std::sync::atomic::Ordering::Release);
+                // A runtime permission dialog pauses the Activity too. Keep its
+                // pending request alive; actual backgrounding still emits Stop.
+                if PERMISSION_DIALOGS.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                    WINDOW.with(|slot| {
+                        if let Some(window) = slot.borrow().as_ref().and_then(|w| w.upgrade()) {
+                            window.invoke_backgrounded();
+                        }
+                    });
+                }
+            }
+            PollEvent::Main(MainEvent::Stop) => {
                 FOREGROUND.store(false, std::sync::atomic::Ordering::Release);
                 WINDOW.with(|slot| {
                     if let Some(window) = slot.borrow().as_ref().and_then(|w| w.upgrade()) {
@@ -389,6 +409,9 @@ async fn ensure_permission(
     if check_permission(&app, permission_name)? {
         return Ok(PermissionState::Granted);
     }
+    if PERMISSION_DIALOGS.load(std::sync::atomic::Ordering::Acquire) > 0 {
+        return Err("已有权限请求正在处理，请完成系统弹窗后重试".into());
+    }
     let requested_before = REQUESTED_PERMISSIONS
         .lock()
         .map_err(|_| "无法读取权限状态".to_string())?
@@ -402,6 +425,8 @@ async fn ensure_permission(
         }
     }
 
+    PERMISSION_DIALOGS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    let _dialog = PermissionDialog;
     let request_app = app.clone();
     let (sender, receiver) = std::sync::mpsc::sync_channel(1);
     app.run_on_java_main_thread(Box::new(move || {
@@ -412,10 +437,21 @@ async fn ensure_permission(
         .recv_timeout(Duration::from_secs(2))
         .map_err(|_| "Android 权限请求超时".to_string())??;
 
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut saw_pause = false;
+    let mut resumed_at = None;
     while Instant::now() < deadline {
-        if check_permission(&app, permission_name)? {
+        if check_permission(&app, permission_name)? && is_foreground() {
             return Ok(PermissionState::Granted);
+        }
+        if !is_foreground() {
+            saw_pause = true;
+            resumed_at = None;
+        } else if saw_pause {
+            let resumed = resumed_at.get_or_insert_with(Instant::now);
+            if resumed.elapsed() >= Duration::from_millis(500) {
+                break;
+            }
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
@@ -424,6 +460,39 @@ async fn ensure_permission(
     } else {
         Ok(PermissionState::PermanentlyDenied)
     }
+}
+
+pub(crate) fn display_rotation() -> Result<u32, String> {
+    use jni::objects::JValue;
+    let app = current_app()?;
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.map_err(|e| e.to_string())?;
+    let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+    let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+    let result = (|| {
+        let manager = env
+            .call_method(
+                &activity,
+                "getWindowManager",
+                "()Landroid/view/WindowManager;",
+                &[] as &[JValue],
+            )?
+            .l()?;
+        let display = env
+            .call_method(
+                &manager,
+                "getDefaultDisplay",
+                "()Landroid/view/Display;",
+                &[],
+            )?
+            .l()?;
+        env.call_method(&display, "getRotation", "()I", &[])?.i()
+    })();
+    result
+        .map(|rotation| (rotation as u32 % 4) * 90)
+        .map_err(|error: jni::errors::Error| {
+            clear_pending_exception(&mut env);
+            format!("无法读取屏幕方向: {error}")
+        })
 }
 
 fn current_app() -> Result<slint::android::AndroidApp, String> {

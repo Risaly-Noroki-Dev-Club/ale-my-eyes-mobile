@@ -11,7 +11,9 @@ cargo test --manifest-path tools/ui-preview/Cargo.toml --target-dir target/ui-pr
 cargo run --manifest-path tools/ui-preview/Cargo.toml --target-dir target/ui-preview-build -- target/ui-preview
 ```
 
-Tests reuse the production preference decoder and operation invalidation code.
+Tests reuse production preferences, operation invalidation and YUV conversion.
 Running the tool also asserts navigation/microphone hit targets, recording
 navigation locking and modal interception before rendering sample states.
+Five settings gestures use Slint's native touch entry point (the same as the
+Android backend), including a switch-row start, 3x density and landscape.
 Use the generated PNGs for layout review, not as Android runtime evidence.

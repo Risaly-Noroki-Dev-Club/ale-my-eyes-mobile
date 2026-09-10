@@ -15,6 +15,10 @@ export component AppWindow inherits Window {
     in-out property <string> device-address;
     in-out property <image> remote-scan-preview;
     in-out property <bool> remote-scanning: false;
+    in-out property <string> camera-label: "正在打开后置相机…";
+    out property <float> scan-view-width: scan-surface.width / 1px;
+    out property <float> scan-view-height: scan-surface.height / 1px;
+    out property <float> scan-box-size: max(80px, min(scan-surface.width - 48px, scan-surface.height - 180px, 320px)) / 1px;
     in-out property <bool> voice-recording: false;
     in-out property <bool> is-busy: false;
     in-out property <bool> input-pending: false;
@@ -49,6 +53,10 @@ export component AppWindow inherits Window {
     callback change-preference(string, bool);
     callback backgrounded();
     callback back();
+    callback scan-geometry-changed(float, float, float);
+    changed scan-view-width => { root.scan-geometry-changed(root.scan-view-width, root.scan-view-height, root.scan-box-size); }
+    changed scan-view-height => { root.scan-geometry-changed(root.scan-view-width, root.scan-view-height, root.scan-box-size); }
+    changed scan-box-size => { root.scan-geometry-changed(root.scan-view-width, root.scan-view-height, root.scan-box-size); }
     changed font-scale => { Theme.font-scale = root.font-scale; }
     changed show-confirmation => { if root.show-confirmation { dialog.focus(); } else { app-keys.focus(); } }
     changed confirm-disconnect => { if root.confirm-disconnect { dialog.focus(); } else { app-keys.focus(); } }
@@ -66,12 +74,31 @@ export component AppWindow inherits Window {
           enabled: !root.show-confirmation && !root.confirm-disconnect;
           VerticalLayout {
             spacing: 0px;
-            Rectangle {
+            scan-surface := Rectangle {
                 vertical-stretch: 1;
                 background: root.current-page == MobilePage.scan ? @linear-gradient(160deg, #2a2233, #0e0b14) : Theme.background;
+                if root.current-page == MobilePage.scan && root.remote-scanning : Rectangle {
+                    clip: true;
+                    Image { width: parent.width; height: parent.height; source: root.remote-scan-preview; image-fit: cover; }
+                    // These four masks leave exactly the decoder's rectangular ROI clear.
+                    Rectangle { x: 0px; y: 0px; width: parent.width; height: (parent.height - root.scan-box-size * 1px) / 2; background: #00000088; }
+                    Rectangle { y: (parent.height + root.scan-box-size * 1px) / 2; width: parent.width; height: parent.height - self.y; background: #00000088; }
+                    Rectangle { x: 0px; y: (parent.height - root.scan-box-size * 1px) / 2; width: (parent.width - root.scan-box-size * 1px) / 2; height: root.scan-box-size * 1px; background: #00000088; }
+                    Rectangle { x: (parent.width + root.scan-box-size * 1px) / 2; y: (parent.height - root.scan-box-size * 1px) / 2; width: parent.width - self.x; height: root.scan-box-size * 1px; background: #00000088; }
+                    Rectangle { x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; width: root.scan-box-size * 1px; height: self.width; border-width: 2px; border-color: white; }
+                    VerticalLayout {
+                        padding: 20px; spacing: 8px;
+                        Label { text: "扫描二维码"; color: white; font-size: 22px * Theme.font-scale; font-weight: 700; }
+                        Label { text: root.camera-label; color: white; }
+                        Rectangle { vertical-stretch: 1; }
+                        Label { text: "仅识别框内的二维码"; color: white; horizontal-alignment: center; }
+                        ActionButton { text: "取消扫描"; clicked => { root.cancel-remote-scan(); } }
+                    }
+                }
                 Rectangle {
                     width: min(parent.width, 560px); x: (parent.width - self.width) / 2; height: parent.height;
-                    if root.current-page == MobilePage.scan : ScrollView {
+                    if root.current-page == MobilePage.scan && !root.remote-scanning : ScrollView {
+                        mouse-drag-pan-enabled: true;
                         viewport-width: self.width;
                         VerticalLayout {
                             padding: 20px; spacing: 20px;
@@ -132,6 +159,7 @@ export component AppWindow inherits Window {
                         }
                         Rectangle { height: 1px; background: Theme.outline; }
                         ScrollView {
+                            mouse-drag-pan-enabled: true;
                             vertical-stretch: 1; viewport-width: self.width;
                             VerticalLayout {
                                 padding: 20px; spacing: 16px; alignment: start;
@@ -173,6 +201,7 @@ export component AppWindow inherits Window {
                         }
                     }
                     if root.current-page == MobilePage.settings : ScrollView {
+                        mouse-drag-pan-enabled: true;
                         viewport-width: self.width;
                         VerticalLayout {
                             padding: 16px; spacing: 16px; alignment: start;
@@ -238,6 +267,7 @@ export component AppWindow inherits Window {
                     padding: 24px; spacing: 16px;
                     Label { text: root.confirm-disconnect ? "断开连接？" : root.confirmation-title; font-weight: 700; font-size: 22px * Theme.font-scale; }
                     ScrollView {
+                        mouse-drag-pan-enabled: true;
                         vertical-stretch: 1; viewport-width: self.width;
                         VerticalLayout {
                             alignment: start;

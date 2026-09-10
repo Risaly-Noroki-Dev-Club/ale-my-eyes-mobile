@@ -1,30 +1,74 @@
 #![cfg(target_os = "android")]
 
+use crate::camera_frame::{
+    camera_rank, choose_preview_size, color_preview, crop_scan_region, Plane, ScanRegion,
+};
 use ale_core::remote::PairingInfo;
 use ndk::media::image_reader::{AcquireResult, ImageFormat, ImageReader};
 use ndk::native_window::NativeWindow;
 use ndk_sys as ffi;
 use std::ffi::CStr;
 use std::ptr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::Duration;
 
-const FRAME_WIDTH: i32 = 1280;
-const FRAME_HEIGHT: i32 = 720;
 const SCAN_TIMEOUT: Duration = Duration::from_secs(45);
+// Cancelling and immediately retrying must not open a second camera before
+// the previous session has completed synchronous device teardown.
+static CAMERA_GATE: Mutex<()> = Mutex::new(());
+
+struct CameraProfile {
+    id: Vec<u8>,
+    width: i32,
+    height: i32,
+    orientation: u32,
+    logical: bool,
+    rank: (bool, u32),
+}
 
 pub fn scan_pairing_info(
     cancelled: Arc<AtomicBool>,
-    preview: impl Fn(Vec<u8>, usize, usize) + Send + Sync + 'static,
+    region: Arc<Mutex<ScanRegion>>,
+    selected: impl Fn(String),
+    preview: impl Fn(Vec<u8>, usize, usize, u32) + Send + Sync + 'static,
 ) -> Result<PairingInfo, String> {
+    let _camera_guard = CAMERA_GATE.lock().map_err(|_| "相机状态不可用")?;
+    if cancelled.load(Ordering::Acquire) {
+        return Err("扫描已取消".into());
+    }
+    let manager = unsafe { ffi::ACameraManager_create() };
+    if manager.is_null() {
+        return Err("无法访问 Android 相机服务".into());
+    }
+    let profile = CameraSession::back_camera_profile(manager);
+    unsafe { ffi::ACameraManager_delete(manager) };
+    let profile = profile?;
+    selected(
+        if profile.logical {
+            "后置相机 · 1×（系统多摄）"
+        } else {
+            "后置相机 · 标准视角"
+        }
+        .into(),
+    );
+    tracing::info!(
+        "Selected rear camera ID: {}",
+        String::from_utf8_lossy(&profile.id)
+    );
+    tracing::info!(
+        "QR camera: {}x{}, sensor rotation {}",
+        profile.width,
+        profile.height,
+        profile.orientation
+    );
     let (sender, receiver) = mpsc::sync_channel(1);
     let found = Arc::new(AtomicBool::new(false));
     let decoder = Arc::new(Mutex::new(quircs::Quirc::default()));
     let preview = Arc::new(preview);
     let preview_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
 
-    let mut reader = ImageReader::new(FRAME_WIDTH, FRAME_HEIGHT, ImageFormat::YUV_420_888, 3)
+    let mut reader = ImageReader::new(profile.width, profile.height, ImageFormat::YUV_420_888, 3)
         .map_err(|error| format!("无法创建扫码画面: {error}"))?;
     reader
         .set_image_listener(Box::new({
@@ -33,6 +77,7 @@ pub fn scan_pairing_info(
             let decoder = decoder.clone();
             let preview = preview.clone();
             let preview_counter = preview_counter.clone();
+            let orientation = profile.orientation;
             move |reader| {
                 if found.load(Ordering::Acquire) || cancelled.load(Ordering::Acquire) {
                     return;
@@ -48,20 +93,24 @@ pub fn scan_pairing_info(
                 if width == 0 || height == 0 {
                     return;
                 }
+                let display = crate::android::display_rotation().unwrap_or(0);
+                let rotation = (orientation + 360 - display) % 360;
                 if preview_counter
                     .fetch_add(1, Ordering::Relaxed)
                     .is_multiple_of(6)
                 {
-                    let preview_width = width / 2;
-                    let preview_height = height / 2;
-                    let mut preview_gray = Vec::with_capacity(preview_width * preview_height);
-                    for y in 0..preview_height {
-                        for x in 0..preview_width {
-                            preview_gray.push(gray[(y * 2) * width + x * 2]);
-                        }
+                    match copy_color_preview(&image, rotation) {
+                        Ok((rgb, w, h)) => preview(rgb, w, h, rotation),
+                        Err(error) => tracing::warn!("Camera preview: {error}"),
                     }
-                    preview(preview_gray, preview_width, preview_height);
                 }
+                let Some((gray, width, height)) = region
+                    .lock()
+                    .ok()
+                    .and_then(|region| crop_scan_region(&gray, width, height, rotation, *region))
+                else {
+                    return;
+                };
                 let Ok(mut decoder) = decoder.try_lock() else {
                     return;
                 };
@@ -83,11 +132,19 @@ pub fn scan_pairing_info(
         }))
         .map_err(|error| format!("无法读取扫码画面: {error}"))?;
 
-    let camera = CameraSession::open(reader)?;
+    let camera = CameraSession::open(reader, &profile.id)?;
     let deadline = std::time::Instant::now() + SCAN_TIMEOUT;
     let result = loop {
         if cancelled.load(Ordering::Acquire) {
             break Err("扫描已取消".to_string());
+        }
+        let error = camera.error.load(Ordering::Acquire);
+        if error != 0 {
+            break Err(if error == -1 {
+                "相机已断开，请关闭其他占用相机的应用后重试".into()
+            } else {
+                format!("相机服务发生错误 ({error})，请重新扫描")
+            });
         }
         if std::time::Instant::now() >= deadline {
             break Err("扫描超时，请让桌面二维码完整出现在镜头中".to_string());
@@ -102,6 +159,25 @@ pub fn scan_pairing_info(
     };
     drop(camera);
     result
+}
+
+fn copy_color_preview(
+    image: &ndk::media::image_reader::Image,
+    rotation: u32,
+) -> Result<(Vec<u8>, usize, usize), String> {
+    let plane = |index| -> Result<Plane<'_>, String> {
+        Ok(Plane {
+            data: image.plane_data(index).map_err(|e| e.to_string())?,
+            row_stride: image.plane_row_stride(index).map_err(|e| e.to_string())? as usize,
+            pixel_stride: image.plane_pixel_stride(index).map_err(|e| e.to_string())? as usize,
+        })
+    };
+    color_preview(
+        image.width().map_err(|e| e.to_string())? as usize,
+        image.height().map_err(|e| e.to_string())? as usize,
+        [plane(0)?, plane(1)?, plane(2)?],
+        rotation,
+    )
 }
 
 fn copy_luminance(image: &ndk::media::image_reader::Image) -> Result<Vec<u8>, String> {
@@ -142,10 +218,11 @@ struct CameraSession {
     container: *mut ffi::ACaptureSessionOutputContainer,
     _window: NativeWindow,
     _reader: ImageReader,
+    error: Box<AtomicI32>,
 }
 
 impl CameraSession {
-    fn open(reader: ImageReader) -> Result<Self, String> {
+    fn open(reader: ImageReader, camera_id: &[u8]) -> Result<Self, String> {
         let window = reader
             .window()
             .map_err(|error| format!("无法创建相机输出: {error}"))?;
@@ -159,14 +236,14 @@ impl CameraSession {
             container: ptr::null_mut(),
             _window: window,
             _reader: reader,
+            error: Box::new(AtomicI32::new(0)),
         };
         if camera.manager.is_null() {
             return Err("无法访问 Android 相机服务".to_string());
         }
 
-        let camera_id = camera.back_camera_id()?;
         let mut device_callbacks = ffi::ACameraDevice_StateCallbacks {
-            context: ptr::null_mut(),
+            context: (&*camera.error as *const AtomicI32).cast_mut().cast(),
             onDisconnected: Some(camera_disconnected),
             onError: Some(camera_error),
         };
@@ -230,6 +307,17 @@ impl CameraSession {
             )
         };
         let mut request = camera.request;
+        // Logical rear cameras use their normal 1x field of view; let Camera2
+        // manage the physical sensors instead of opening arbitrary auxiliary IDs.
+        let zoom = 1.0_f32;
+        let _ = unsafe {
+            ffi::ACaptureRequest_setEntry_float(
+                camera.request,
+                ffi::acamera_metadata_tag::ACAMERA_CONTROL_ZOOM_RATIO.0,
+                1,
+                &zoom,
+            )
+        };
         check("开始读取相机画面", unsafe {
             ffi::ACameraCaptureSession_setRepeatingRequest(
                 camera.session,
@@ -242,27 +330,29 @@ impl CameraSession {
         Ok(camera)
     }
 
-    fn back_camera_id(&self) -> Result<Vec<u8>, String> {
+    fn back_camera_profile(manager: *mut ffi::ACameraManager) -> Result<CameraProfile, String> {
         let mut list = ptr::null_mut();
         check("读取相机列表", unsafe {
-            ffi::ACameraManager_getCameraIdList(self.manager, &mut list)
+            ffi::ACameraManager_getCameraIdList(manager, &mut list)
         })?;
         if list.is_null() {
             return Err("设备没有可用相机".to_string());
         }
 
         let result = unsafe {
+            if (*list).numCameras <= 0 || (*list).cameraIds.is_null() {
+                ffi::ACameraManager_deleteCameraIdList(list);
+                return Err("设备没有可用相机".into());
+            }
             let ids = std::slice::from_raw_parts((*list).cameraIds, (*list).numCameras as usize);
-            let mut fallback = None;
-            let mut selected = None;
+            let mut selected: Option<CameraProfile> = None;
             for &id in ids {
                 if id.is_null() {
                     continue;
                 }
                 let bytes = CStr::from_ptr(id).to_bytes_with_nul().to_vec();
-                fallback.get_or_insert_with(|| bytes.clone());
                 let mut metadata = ptr::null_mut();
-                if ffi::ACameraManager_getCameraCharacteristics(self.manager, id, &mut metadata)
+                if ffi::ACameraManager_getCameraCharacteristics(manager, id, &mut metadata)
                     != ffi::camera_status_t::ACAMERA_OK
                     || metadata.is_null()
                 {
@@ -274,24 +364,103 @@ impl CameraSession {
                     ffi::acamera_metadata_tag::ACAMERA_LENS_FACING.0,
                     &mut entry,
                 );
-                if status == ffi::camera_status_t::ACAMERA_OK
+                let back = status == ffi::camera_status_t::ACAMERA_OK
                     && entry.count > 0
                     && !entry.data.u8_.is_null()
                     && *entry.data.u8_
                         == ffi::acamera_metadata_enum_acamera_lens_facing::ACAMERA_LENS_FACING_BACK
-                            .0 as u8
+                            .0 as u8;
+                if !back {
+                    ffi::ACameraMetadata_free(metadata);
+                    continue;
+                }
+                let mut capabilities = std::mem::zeroed::<ffi::ACameraMetadata_const_entry>();
+                let logical = ffi::ACameraMetadata_getConstEntry(
+                    metadata,
+                    ffi::acamera_metadata_tag::ACAMERA_REQUEST_AVAILABLE_CAPABILITIES.0,
+                    &mut capabilities,
+                ) == ffi::camera_status_t::ACAMERA_OK
+                    && capabilities.count > 0
+                    && !capabilities.data.u8_.is_null()
+                    && std::slice::from_raw_parts(
+                        capabilities.data.u8_,
+                        capabilities.count as usize,
+                    )
+                    .contains(&11);
+                let mut focal = std::mem::zeroed::<ffi::ACameraMetadata_const_entry>();
+                let focal_length = if ffi::ACameraMetadata_getConstEntry(
+                    metadata,
+                    ffi::acamera_metadata_tag::ACAMERA_LENS_INFO_AVAILABLE_FOCAL_LENGTHS.0,
+                    &mut focal,
+                ) == ffi::camera_status_t::ACAMERA_OK
+                    && focal.count > 0
+                    && !focal.data.f.is_null()
                 {
-                    selected = Some(bytes);
+                    *focal.data.f
+                } else {
+                    0.0
+                };
+                let mut physical = std::mem::zeroed::<ffi::ACameraMetadata_const_entry>();
+                let sensor_width = if ffi::ACameraMetadata_getConstEntry(
+                    metadata,
+                    ffi::acamera_metadata_tag::ACAMERA_SENSOR_INFO_PHYSICAL_SIZE.0,
+                    &mut physical,
+                ) == ffi::camera_status_t::ACAMERA_OK
+                    && physical.count > 0
+                    && !physical.data.f.is_null()
+                {
+                    *physical.data.f
+                } else {
+                    0.0
+                };
+                let mut orientation = std::mem::zeroed::<ffi::ACameraMetadata_const_entry>();
+                let rotation = if ffi::ACameraMetadata_getConstEntry(
+                    metadata,
+                    ffi::acamera_metadata_tag::ACAMERA_SENSOR_ORIENTATION.0,
+                    &mut orientation,
+                ) == ffi::camera_status_t::ACAMERA_OK
+                    && orientation.count > 0
+                    && !orientation.data.i32_.is_null()
+                {
+                    (*orientation.data.i32_).rem_euclid(360) as u32
+                } else {
+                    0
+                };
+                let mut streams = std::mem::zeroed::<ffi::ACameraMetadata_const_entry>();
+                if ffi::ACameraMetadata_getConstEntry(
+                    metadata,
+                    ffi::acamera_metadata_tag::ACAMERA_SCALER_AVAILABLE_STREAM_CONFIGURATIONS.0,
+                    &mut streams,
+                ) == ffi::camera_status_t::ACAMERA_OK
+                    && streams.count > 0
+                    && !streams.data.i32_.is_null()
+                {
+                    if let Some((width, height)) = choose_preview_size(std::slice::from_raw_parts(
+                        streams.data.i32_,
+                        streams.count as usize,
+                    )) {
+                        let profile = CameraProfile {
+                            id: bytes,
+                            width,
+                            height,
+                            orientation: rotation,
+                            logical,
+                            rank: camera_rank(logical, focal_length, sensor_width),
+                        };
+                        if selected
+                            .as_ref()
+                            .is_none_or(|old| (profile.rank, &profile.id) < (old.rank, &old.id))
+                        {
+                            selected = Some(profile);
+                        }
+                    }
                 }
                 ffi::ACameraMetadata_free(metadata);
-                if selected.is_some() {
-                    break;
-                }
             }
-            selected.or(fallback)
+            selected
         };
         unsafe { ffi::ACameraManager_deleteCameraIdList(list) };
-        result.ok_or_else(|| "设备没有可用相机".to_string())
+        result.ok_or_else(|| "没有可用的后置扫码相机；不会自动切换到前置相机".to_string())
     }
 }
 
@@ -333,16 +502,22 @@ fn check(action: &str, status: ffi::camera_status_t) -> Result<(), String> {
 }
 
 unsafe extern "C" fn camera_disconnected(
-    _context: *mut std::ffi::c_void,
+    context: *mut std::ffi::c_void,
     _device: *mut ffi::ACameraDevice,
 ) {
+    if !context.is_null() {
+        unsafe { &*context.cast::<AtomicI32>() }.store(-1, Ordering::Release);
+    }
     tracing::warn!("QR scanner camera disconnected");
 }
 
 unsafe extern "C" fn camera_error(
-    _context: *mut std::ffi::c_void,
+    context: *mut std::ffi::c_void,
     _device: *mut ffi::ACameraDevice,
     error: i32,
 ) {
+    if !context.is_null() {
+        unsafe { &*context.cast::<AtomicI32>() }.store(error, Ordering::Release);
+    }
     tracing::warn!("QR scanner camera error: {}", error);
 }

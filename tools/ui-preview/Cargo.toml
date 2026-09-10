@@ -9,6 +9,12 @@ publish = false
 [dependencies]
 slint = { version = "=1.16.1", default-features = false, features = ["std", "compat-1-2", "renderer-software", "software-renderer-systemfonts"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
+# Match Android's native touch dispatch, which is distinct from mouse events.
+i-slint-core = { version = "=1.16.1", default-features = false }
 
 [build-dependencies]
 slint-build = "=1.16.1"
+
+[dev-dependencies]
+qrcode = { version = "0.14", default-features = false }
+quircs = "0.10.3"
