@@ -4,6 +4,10 @@ Release is blocked until every required item below has evidence. Store local AVD
 
 ## Compatibility gate
 
+- [ ] New three-page UI: complete the device and TalkBack gates in
+  [MOBILE-UI-MIGRATION.md](MOBILE-UI-MIGRATION.md). Host-rendered previews do not
+  establish Android accessibility or camera/microphone interoperability.
+
 - [ ] Desktop implements `REMOTE-PROTOCOL-V3.md` without fallback to older versions.
 - [ ] Desktop validates chunk sequence, byte limit, frame count, and SHA-256 before ASR.
 - [ ] Desktop cancellation and disconnect prevent later command execution.

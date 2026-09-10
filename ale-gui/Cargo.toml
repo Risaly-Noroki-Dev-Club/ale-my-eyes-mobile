@@ -50,3 +50,6 @@ name = "android.permission.MODIFY_AUDIO_SETTINGS"
 
 [[package.metadata.android.uses_permission]]
 name = "android.permission.CAMERA"
+
+[[package.metadata.android.uses_permission]]
+name = "android.permission.VIBRATE"

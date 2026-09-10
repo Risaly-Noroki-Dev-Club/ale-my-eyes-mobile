@@ -6,6 +6,14 @@ use std::time::{Duration, Instant};
 static ANDROID_APP: Mutex<Option<slint::android::AndroidApp>> = Mutex::new(None);
 static REQUESTED_PERMISSIONS: Mutex<Vec<&'static str>> = Mutex::new(Vec::new());
 static ANDROID_TTS: Mutex<Option<jni::objects::GlobalRef>> = Mutex::new(None);
+thread_local! {
+    static WINDOW: std::cell::RefCell<Option<slint::Weak<AppWindow>>> = const { std::cell::RefCell::new(None) };
+}
+static FOREGROUND: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub(crate) fn is_foreground() -> bool {
+    FOREGROUND.load(std::sync::atomic::Ordering::Acquire)
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PermissionState {
@@ -19,7 +27,28 @@ fn android_main(app: slint::android::AndroidApp) {
     if let Ok(mut current_app) = ANDROID_APP.lock() {
         *current_app = Some(app.clone());
     }
-    if let Err(error) = slint::android::init(app) {
+    if let Err(error) = slint::android::init_with_event_listener(app, |event| {
+        use slint::android::android_activity::{MainEvent, PollEvent};
+        match event {
+            PollEvent::Main(MainEvent::Pause) => {
+                FOREGROUND.store(false, std::sync::atomic::Ordering::Release);
+                WINDOW.with(|slot| {
+                    if let Some(window) = slot.borrow().as_ref().and_then(|w| w.upgrade()) {
+                        window.invoke_backgrounded();
+                    }
+                });
+            }
+            PollEvent::Main(MainEvent::Resume { .. }) => {
+                FOREGROUND.store(true, std::sync::atomic::Ordering::Release);
+                WINDOW.with(|slot| {
+                    if let Some(window) = slot.borrow().as_ref().and_then(|w| w.upgrade()) {
+                        window.set_font_scale(font_scale().unwrap_or(1.0));
+                    }
+                });
+            }
+            _ => {}
+        }
+    }) {
         tracing::error!("Failed to initialize Slint Android backend: {}", error);
         clear_android_app();
         return;
@@ -45,10 +74,205 @@ fn android_main(app: slint::android::AndroidApp) {
         }
     };
     crate::setup_app(&window);
+    WINDOW.with(|slot| *slot.borrow_mut() = Some(window.as_weak()));
     if let Err(error) = window.run() {
         tracing::error!("Android app exited with error: {}", error);
     }
     clear_android_app();
+    WINDOW.with(|slot| slot.borrow_mut().take());
+}
+
+fn with_android<T>(
+    f: impl for<'local> FnOnce(
+        &mut jni::JNIEnv<'local>,
+        &jni::objects::JObject<'local>,
+    ) -> jni::errors::Result<T>,
+) -> Result<T, String> {
+    let app = current_app()?;
+    let vm = unsafe { jni::JavaVM::from_raw(app.vm_as_ptr().cast()) }.map_err(|e| e.to_string())?;
+    let mut env = vm.attach_current_thread().map_err(|e| e.to_string())?;
+    let result = env.with_local_frame(32, |env| {
+        let activity = unsafe { jni::objects::JObject::from_raw(app.activity_as_ptr().cast()) };
+        f(env, &activity)
+    });
+    result.map_err(|e: jni::errors::Error| {
+        clear_pending_exception(&mut env);
+        e.to_string()
+    })
+}
+
+pub(crate) fn load_preferences() -> Result<crate::preferences::Preferences, String> {
+    with_android(|env, activity| {
+        use jni::objects::{JObject, JString, JValue};
+        let name = env.new_string("mobile_preferences")?;
+        let prefs = env
+            .call_method(
+                activity,
+                "getSharedPreferences",
+                "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
+                &[JValue::Object(&name), JValue::Int(0)],
+            )?
+            .l()?;
+        let mut values = std::collections::HashMap::new();
+        for (key, _) in crate::preferences::Preferences::default().entries() {
+            let java_key = env.new_string(key)?;
+            let value = env
+                .call_method(
+                    &prefs,
+                    "getString",
+                    "(Ljava/lang/String;Ljava/lang/String;)Ljava/lang/String;",
+                    &[JValue::Object(&java_key), JValue::Object(&JObject::null())],
+                )?
+                .l()?;
+            if !value.is_null() {
+                values.insert(
+                    key.to_string(),
+                    env.get_string(&JString::from(value))?.into(),
+                );
+            }
+        }
+        Ok(crate::preferences::Preferences::from_values(|key| {
+            values.remove(key)
+        }))
+    })
+}
+
+pub(crate) fn save_preferences(preferences: crate::preferences::Preferences) -> Result<(), String> {
+    let saved = with_android(|env, activity| {
+        use jni::objects::JValue;
+        let name = env.new_string("mobile_preferences")?;
+        let prefs = env
+            .call_method(
+                activity,
+                "getSharedPreferences",
+                "(Ljava/lang/String;I)Landroid/content/SharedPreferences;",
+                &[JValue::Object(&name), JValue::Int(0)],
+            )?
+            .l()?;
+        let editor = env
+            .call_method(
+                &prefs,
+                "edit",
+                "()Landroid/content/SharedPreferences$Editor;",
+                &[],
+            )?
+            .l()?;
+        for (key, value) in preferences.entries() {
+            let key = env.new_string(key)?;
+            let value = env.new_string(value.to_string())?;
+            env.call_method(
+                &editor,
+                "putString",
+                "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/SharedPreferences$Editor;",
+                &[JValue::Object(&key), JValue::Object(&value)],
+            )?;
+        }
+        env.call_method(&editor, "commit", "()Z", &[])?.z()
+    })?;
+    if saved {
+        Ok(())
+    } else {
+        Err("无法保存设置，请重试".into())
+    }
+}
+
+pub(crate) fn set_speech_language(english: bool) -> Result<(), String> {
+    let status = with_android(|env, _| {
+        use jni::objects::JValue;
+        let guard = ANDROID_TTS.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(tts) = guard.as_ref() else {
+            return Ok(-2);
+        };
+        let locale = env
+            .get_static_field(
+                "java/util/Locale",
+                if english { "US" } else { "SIMPLIFIED_CHINESE" },
+                "Ljava/util/Locale;",
+            )?
+            .l()?;
+        let available = env
+            .call_method(
+                tts.as_obj(),
+                "isLanguageAvailable",
+                "(Ljava/util/Locale;)I",
+                &[JValue::Object(&locale)],
+            )?
+            .i()?;
+        if available < 0 {
+            return Ok(available);
+        }
+        env.call_method(
+            tts.as_obj(),
+            "setLanguage",
+            "(Ljava/util/Locale;)I",
+            &[JValue::Object(&locale)],
+        )?
+        .i()
+    })?;
+    if status >= 0 {
+        Ok(())
+    } else {
+        Err("朗读引擎尚未就绪或缺少所选语言，请检查系统语音设置后重试".into())
+    }
+}
+
+pub(crate) fn vibrate() {
+    if let Err(error) = with_android(|env, activity| {
+        use jni::objects::JValue;
+        let name = env.new_string("vibrator")?;
+        let vibrator = env
+            .call_method(
+                activity,
+                "getSystemService",
+                "(Ljava/lang/String;)Ljava/lang/Object;",
+                &[JValue::Object(&name)],
+            )?
+            .l()?;
+        if !vibrator.is_null() && env.call_method(&vibrator, "hasVibrator", "()Z", &[])?.z()? {
+            let effect = env
+                .call_static_method(
+                    "android/os/VibrationEffect",
+                    "createOneShot",
+                    "(JI)Landroid/os/VibrationEffect;",
+                    &[JValue::Long(35), JValue::Int(-1)],
+                )?
+                .l()?;
+            env.call_method(
+                &vibrator,
+                "vibrate",
+                "(Landroid/os/VibrationEffect;)V",
+                &[JValue::Object(&effect)],
+            )?;
+        }
+        Ok(())
+    }) {
+        tracing::warn!("Haptic feedback unavailable: {error}");
+    }
+}
+
+pub(crate) fn font_scale() -> Result<f32, String> {
+    with_android(|env, activity| {
+        let resources = env
+            .call_method(
+                activity,
+                "getResources",
+                "()Landroid/content/res/Resources;",
+                &[],
+            )?
+            .l()?;
+        let config = env
+            .call_method(
+                &resources,
+                "getConfiguration",
+                "()Landroid/content/res/Configuration;",
+                &[],
+            )?
+            .l()?;
+        Ok(env
+            .get_field(&config, "fontScale", "F")?
+            .f()?
+            .clamp(1.0, 3.0))
+    })
 }
 
 pub(crate) async fn ensure_camera_permission() -> Result<PermissionState, String> {

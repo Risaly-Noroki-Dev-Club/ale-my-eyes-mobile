@@ -2,6 +2,8 @@
 
 mod android;
 mod audio;
+mod operation_epoch;
+mod preferences;
 mod qr_scanner;
 
 use ale_core::remote::{
@@ -26,6 +28,7 @@ struct AppState {
     pending_request_id: Option<String>,
     pending_decision: Option<DecisionRequest>,
     recording_started: Option<Instant>,
+    cancelled_requests: std::collections::VecDeque<String>,
 }
 
 impl AppState {
@@ -38,6 +41,7 @@ impl AppState {
             pending_request_id: None,
             pending_decision: None,
             recording_started: None,
+            cancelled_requests: std::collections::VecDeque::new(),
         }
     }
 
@@ -51,6 +55,11 @@ impl AppState {
 }
 
 pub fn setup_app(app: &AppWindow) {
+    app.set_app_version(env!("CARGO_PKG_VERSION").into());
+    app.set_protocol_version(
+        format!("ale-my-eyes v{}", ale_core::remote::REMOTE_PROTOCOL_VERSION).into(),
+    );
+    app.set_font_scale(android::font_scale().unwrap_or(1.0));
     app.set_remote_status("扫描桌面端 v3 二维码以开始".into());
     if let Err(error) = android::initialize_tts() {
         tracing::warn!("Android TTS initialization failed: {}", error);
@@ -96,6 +105,7 @@ pub fn setup_app(app: &AppWindow) {
     wire_recording(app, state.clone(), stream_gate.clone(), recording_timer);
     wire_confirmation(app, state.clone());
     wire_disconnect(app, state.clone(), qr_scan_cancel);
+    wire_mobile_ui(app);
 
     let app_weak = app.as_weak();
     app.on_open_app_settings(move || {
@@ -105,6 +115,138 @@ pub fn setup_app(app: &AppWindow) {
             }
         }
     });
+}
+
+fn apply_preferences(app: &AppWindow, prefs: preferences::Preferences) {
+    app.set_speak_results(prefs.speak_results);
+    app.set_haptics(prefs.haptics);
+    app.set_auto_scan(prefs.auto_scan);
+    app.set_english_voice(prefs.english_voice);
+}
+
+fn feedback(app: &AppWindow) {
+    if app.get_haptics() {
+        android::vibrate();
+    }
+}
+
+fn wire_mobile_ui(app: &AppWindow) {
+    let prefs = match android::load_preferences() {
+        Ok(prefs) => prefs,
+        Err(error) => {
+            app.set_settings_message(format!("设置读取失败，已使用默认值：{error}").into());
+            preferences::Preferences::default()
+        }
+    };
+    apply_preferences(app, prefs);
+    let current = Rc::new(std::cell::Cell::new(prefs));
+    let weak = app.as_weak();
+    app.on_change_preference(move |key, value| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        let previous = current.get();
+        let mut updated = previous;
+        if !updated.set(key.as_str(), value) {
+            return;
+        }
+        if key == "english_voice" {
+            if let Err(error) = android::set_speech_language(value) {
+                app.set_settings_message(error.into());
+                return;
+            }
+        }
+        if let Err(error) = android::save_preferences(updated) {
+            if key == "english_voice" {
+                let _ = android::set_speech_language(previous.english_voice);
+            }
+            app.set_settings_message(error.into());
+            return;
+        }
+        current.set(updated);
+        apply_preferences(&app, updated);
+        app.set_settings_message("设置已保存".into());
+        if key == "speak_results" && !value && !app.get_show_confirmation() {
+            android::stop_tts();
+        }
+    });
+    let weak = app.as_weak();
+    app.on_change_page(move |page| {
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
+        if app.get_voice_recording() || app.get_input_pending() || app.get_show_confirmation() {
+            return;
+        }
+        if app.get_current_page() == MobilePage::Scan
+            && page != MobilePage::Scan
+            && !app.get_remote_connected()
+        {
+            app.invoke_cancel_remote_scan();
+        }
+        app.set_current_page(page);
+    });
+    let weak = app.as_weak();
+    app.on_backgrounded(move || {
+        if let Some(app) = weak.upgrade() {
+            if !app.get_remote_connected() {
+                app.invoke_cancel_remote_scan();
+            }
+            if app.get_voice_recording() || app.get_input_pending() {
+                app.invoke_cancel_request();
+            }
+            android::stop_tts();
+        }
+    });
+    let weak = app.as_weak();
+    app.on_back(move || {
+        if let Some(app) = weak.upgrade() {
+            if app.get_confirm_disconnect() {
+                app.set_confirm_disconnect(false);
+            } else if app.get_show_confirmation() {
+                app.invoke_cancel_action();
+            } else if app.get_voice_recording() || app.get_input_pending() {
+                app.invoke_cancel_request();
+            } else if !app.get_remote_connected()
+                && (app.get_remote_scanning() || app.get_is_busy())
+            {
+                app.invoke_cancel_remote_scan();
+            } else if app.get_current_page() != MobilePage::Scan {
+                app.invoke_change_page(MobilePage::Scan);
+            }
+        }
+    });
+    // TTS initialization is asynchronous: retry readiness, never block the UI loop.
+    let weak = app.as_weak();
+    spawn_local_task(async move {
+        for _ in 0..20 {
+            let Some(app) = weak.upgrade() else {
+                return;
+            };
+            if android::set_speech_language(app.get_english_voice()).is_ok() {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+        if let Some(app) = weak.upgrade() {
+            app.set_settings_message("朗读引擎不可用，请检查系统语音设置；仍可查看文字结果".into());
+        }
+    });
+    // Deliberately scheduled exactly once per app instance, never on tab changes/resume.
+    if prefs.auto_scan {
+        let weak = app.as_weak();
+        slint::Timer::single_shot(Duration::from_millis(300), move || {
+            if let Some(app) = weak.upgrade() {
+                if android::is_foreground()
+                    && app.get_current_page() == MobilePage::Scan
+                    && !app.get_remote_connected()
+                    && !app.get_is_busy()
+                {
+                    app.invoke_scan_remote();
+                }
+            }
+        });
+    }
 }
 
 fn wire_scan(
@@ -117,6 +259,19 @@ fn wire_scan(
     let scan_state = state.clone();
     let scan_cancel = qr_scan_cancel.clone();
     app.on_scan_remote(move || {
+        let Some(app) = app_weak.upgrade() else {
+            return;
+        };
+        if app.get_remote_connected() || app.get_is_busy() || !android::is_foreground() {
+            return;
+        }
+        app.set_is_busy(true);
+        let token = Arc::new(AtomicBool::new(false));
+        if let Ok(mut slot) = scan_cancel.lock() {
+            if let Some(previous) = slot.replace(token.clone()) {
+                previous.store(true, Ordering::Release);
+            }
+        }
         let app_weak = app_weak.clone();
         let state = scan_state.clone();
         let stream_gate = stream_gate.clone();
@@ -126,9 +281,14 @@ fn wire_scan(
                 return;
             };
             app.set_show_settings_action(false);
-            match android::ensure_camera_permission().await {
+            let permission = android::ensure_camera_permission().await;
+            if token.load(Ordering::Acquire) {
+                return;
+            }
+            app.set_is_busy(false);
+            match permission {
                 Ok(android::PermissionState::Granted) => {
-                    start_qr_scan(app_weak, state, stream_gate, qr_scan_cancel);
+                    start_qr_scan(app_weak, state, stream_gate, qr_scan_cancel, token);
                 }
                 Ok(android::PermissionState::Denied) => {
                     app.set_remote_status("相机权限已拒绝，请再次扫描并允许权限".into());
@@ -164,6 +324,7 @@ fn start_qr_scan(
     state: Arc<Mutex<AppState>>,
     stream_gate: Arc<Mutex<()>>,
     qr_scan_cancel: Arc<std::sync::Mutex<Option<Arc<std::sync::atomic::AtomicBool>>>>,
+    cancelled: Arc<AtomicBool>,
 ) {
     let Some(app) = app_weak.upgrade() else {
         return;
@@ -172,18 +333,17 @@ fn start_qr_scan(
     app.set_remote_connected(false);
     app.set_remote_scanning(true);
     app.set_remote_status("将电脑上的 v3 二维码放入框内".into());
-    let cancelled = Arc::new(AtomicBool::new(false));
-    if let Ok(mut slot) = qr_scan_cancel.lock() {
-        if let Some(previous) = slot.replace(cancelled.clone()) {
-            previous.store(true, Ordering::Release);
-        }
-    }
 
     std::thread::spawn(move || {
         let preview_app = app_weak.clone();
         let scan_token = cancelled.clone();
+        let preview_token = cancelled.clone();
         let scan_result = qr_scanner::scan_pairing_info(cancelled, move |gray, width, height| {
+            let token = preview_token.clone();
             let _ = preview_app.upgrade_in_event_loop(move |app| {
+                if token.load(Ordering::Acquire) {
+                    return;
+                }
                 let mut pixels =
                     slint::SharedPixelBuffer::<slint::Rgb8Pixel>::new(width as u32, height as u32);
                 for (pixel, value) in pixels.make_mut_slice().iter_mut().zip(gray) {
@@ -192,12 +352,11 @@ fn start_qr_scan(
                 app.set_remote_scan_preview(slint::Image::from_rgb8(pixels));
             });
         });
-        let should_publish = qr_scan_cancel.lock().is_ok_and(|mut slot| {
+        let should_publish = qr_scan_cancel.lock().is_ok_and(|slot| {
             if slot
                 .as_ref()
                 .is_some_and(|current| Arc::ptr_eq(current, &scan_token))
             {
-                slot.take();
                 true
             } else {
                 false
@@ -206,17 +365,28 @@ fn start_qr_scan(
         if !should_publish {
             return;
         }
-        let _ = app_weak.upgrade_in_event_loop(move |app| match scan_result {
-            Ok(pairing) => {
-                app.set_remote_scanning(false);
-                app.set_remote_status("二维码有效，正在建立 v3 加密会话".into());
-                let app_weak = app.as_weak();
-                spawn_local_task(connect_session(pairing, state, stream_gate, app_weak));
+        let _ = app_weak.upgrade_in_event_loop(move |app| {
+            if scan_token.load(Ordering::Acquire) {
+                return;
             }
-            Err(error) => {
-                app.set_remote_scanning(false);
-                app.set_remote_status(slint::format!("扫描失败: {}", error));
-                app.set_is_busy(false);
+            match scan_result {
+                Ok(pairing) => {
+                    app.set_remote_scanning(false);
+                    app.set_remote_status("二维码有效，正在建立 v3 加密会话".into());
+                    let app_weak = app.as_weak();
+                    spawn_local_task(connect_session(
+                        pairing,
+                        state,
+                        stream_gate,
+                        app_weak,
+                        scan_token,
+                    ));
+                }
+                Err(error) => {
+                    app.set_remote_scanning(false);
+                    app.set_remote_status(slint::format!("扫描失败: {}", error));
+                    app.set_is_busy(false);
+                }
             }
         });
     });
@@ -227,8 +397,16 @@ async fn connect_session(
     state: Arc<Mutex<AppState>>,
     stream_gate: Arc<Mutex<()>>,
     app_weak: slint::Weak<AppWindow>,
+    scan_token: Arc<AtomicBool>,
 ) {
+    let address = format!("{}:{}", pairing.host, pairing.port);
     let result = RemoteSession::connect(pairing).await;
+    if scan_token.load(Ordering::Acquire) {
+        if let Ok(session) = result {
+            session.shutdown().await;
+        }
+        return;
+    }
     let Some(app) = app_weak.upgrade() else {
         return;
     };
@@ -238,6 +416,10 @@ async fn connect_session(
             let mut events = session.subscribe();
             let generation = {
                 let _gate = stream_gate.lock().await;
+                if scan_token.load(Ordering::Acquire) {
+                    session.shutdown().await;
+                    return;
+                }
                 let mut state = state.lock().await;
                 state.clear_request();
                 state.session_generation = state.session_generation.wrapping_add(1);
@@ -247,6 +429,11 @@ async fn connect_session(
             };
             app.set_remote_status(slint::format!("已连接: {}", name));
             app.set_remote_connected(true);
+            app.set_device_name(name.into());
+            app.set_device_address(address.into());
+            app.set_ai_response("".into());
+            app.set_action_steps("".into());
+            feedback(&app);
             app.set_is_busy(false);
             app.set_show_settings_action(false);
             let state = state.clone();
@@ -257,6 +444,9 @@ async fn connect_session(
                         return;
                     }
                     let event = events.borrow_and_update().clone();
+                    if state.lock().await.session_generation != generation {
+                        return;
+                    }
                     match event {
                         Some(RemoteSessionEvent::Disconnected(error)) => {
                             let mut state = state.lock().await;
@@ -283,6 +473,11 @@ async fn connect_session(
                             tracing::warn!("Remote protocol warning: {}", message);
                         }
                         Some(RemoteSessionEvent::Progress(progress)) => {
+                            if state.lock().await.pending_request_id.as_deref()
+                                != Some(progress.request_id.as_str())
+                            {
+                                continue;
+                            }
                             if let Some(app) = app_weak.upgrade() {
                                 app.set_remote_status(progress.message.into());
                             }
@@ -293,6 +488,12 @@ async fn connect_session(
                                 return;
                             }
                             current.pending_decision = Some(decision.clone());
+                            if current.pending_request_id.as_deref()
+                                != Some(decision.request_id.as_str())
+                            {
+                                current.pending_decision = None;
+                                continue;
+                            }
                             drop(current);
                             if let Some(app) = app_weak.upgrade() {
                                 app.set_confirmation_title("需要你的决定".into());
@@ -307,13 +508,20 @@ async fn connect_session(
                             }
                         }
                         Some(RemoteSessionEvent::AssistantOutput(output)) => {
+                            if let Some(id) = &output.request_id {
+                                if state.lock().await.cancelled_requests.contains(id) {
+                                    continue;
+                                }
+                            }
                             if let Some(app) = app_weak.upgrade() {
                                 app.set_ai_response(output.display_text.into());
-                            }
-                            if let Err(error) =
-                                android::speak(&output.speech_text, output.interrupt)
-                            {
-                                tracing::warn!("Android TTS failed: {}", error);
+                                if app.get_speak_results() {
+                                    if let Err(error) =
+                                        android::speak(&output.speech_text, output.interrupt)
+                                    {
+                                        tracing::warn!("Android TTS failed: {}", error);
+                                    }
+                                }
                             }
                         }
                         None => {}
@@ -341,6 +549,8 @@ fn wire_recording(
     stream_gate: Arc<Mutex<()>>,
     recording_timer: Rc<slint::Timer>,
 ) {
+    let input_epoch = Arc::new(operation_epoch::OperationEpoch::default());
+    let start_epoch = input_epoch.clone();
     let toggle_state = state.clone();
     let toggle_gate = stream_gate.clone();
     let app_weak = app.as_weak();
@@ -349,11 +559,17 @@ fn wire_recording(
         let state = toggle_state.clone();
         let stream_gate = toggle_gate.clone();
         let app_weak = app_weak.clone();
+        let input_epoch = start_epoch.clone();
         spawn_local_task(async move {
             let Some(app) = app_weak.upgrade() else {
                 return;
             };
-            if !app.get_remote_connected() || app.get_is_busy() {
+            if !app.get_remote_connected()
+                || app.get_is_busy()
+                || app.get_input_pending()
+                || app.get_show_confirmation()
+                || !android::is_foreground()
+            {
                 return;
             }
             let is_recording = state.lock().await.recorder.is_some();
@@ -362,39 +578,68 @@ fn wire_recording(
                 return;
             }
             app.set_show_settings_action(false);
-            match android::ensure_microphone_permission().await {
+            app.set_input_pending(true);
+            let ticket = input_epoch.advance();
+            let permission = android::ensure_microphone_permission().await;
+            if !app.get_input_pending() || !input_epoch.is_current(ticket) {
+                return;
+            }
+            if !android::is_foreground() || !app.get_remote_connected() {
+                app.set_input_pending(false);
+                return;
+            }
+            match permission {
                 Ok(android::PermissionState::Granted) => {}
                 Ok(android::PermissionState::Denied) => {
+                    app.set_input_pending(false);
                     app.set_remote_status("麦克风权限已拒绝，请再次开始并允许权限".into());
                     return;
                 }
                 Ok(android::PermissionState::PermanentlyDenied) => {
+                    app.set_input_pending(false);
                     app.set_show_settings_action(true);
                     app.set_remote_status("麦克风权限已永久拒绝，请在系统设置中允许".into());
                     return;
                 }
                 Err(error) => {
+                    app.set_input_pending(false);
                     app.set_remote_status(slint::format!("麦克风权限错误: {}", error));
                     return;
                 }
             }
-            start_recording(state, stream_gate, &app).await;
+            start_recording(state, stream_gate, &app, &input_epoch, ticket).await;
+            if input_epoch.is_current(ticket) {
+                app.set_input_pending(false);
+            }
         });
     });
 
     let state = state.clone();
     let app_weak = app.as_weak();
     app.on_cancel_request(move || {
+        input_epoch.advance();
+        if let Some(app) = app_weak.upgrade() {
+            app.set_input_pending(false);
+            app.set_voice_recording(false);
+            app.set_is_busy(true);
+            feedback(&app);
+        }
         let state = state.clone();
         let app_weak = app_weak.clone();
         spawn_local_task(async move {
             let (session, request_id, recorder) = {
                 let mut state = state.lock().await;
                 let session = state.session.clone();
-                let request_id = state
-                    .recording_request_id
-                    .take()
-                    .or_else(|| state.pending_request_id.take());
+                let recording_id = state.recording_request_id.take();
+                let pending_id = state.pending_request_id.take();
+                let request_id = recording_id.or(pending_id);
+                if let Some(id) = &request_id {
+                    state.cancelled_requests.push_back(id.clone());
+                    if state.cancelled_requests.len() > 32 {
+                        state.cancelled_requests.pop_front();
+                    }
+                }
+                state.pending_decision = None;
                 state.recording_started = None;
                 (session, request_id, state.recorder.take())
             };
@@ -415,6 +660,8 @@ async fn start_recording(
     state: Arc<Mutex<AppState>>,
     stream_gate: Arc<Mutex<()>>,
     app: &AppWindow,
+    input_epoch: &operation_epoch::OperationEpoch,
+    ticket: u64,
 ) {
     android::stop_tts();
     let _gate = stream_gate.lock().await;
@@ -443,12 +690,25 @@ async fn start_recording(
         }
     };
     let mut state = state.lock().await;
+    if !input_epoch.is_current(ticket)
+        || !app.get_input_pending()
+        || !android::is_foreground()
+        || state.session.is_none()
+    {
+        drop(state);
+        recorder.stop();
+        let _ = session.cancel(request_id).await;
+        return;
+    }
     state.recorder = Some(recorder);
     state.recording_request_id = Some(request_id.clone());
     state.pending_request_id = Some(request_id);
     state.recording_started = Some(Instant::now());
     drop(state);
     app.set_voice_recording(true);
+    app.set_ai_response("".into());
+    app.set_action_steps("".into());
+    feedback(app);
     app.set_recording_time("00:00 / 01:00".into());
     app.set_remote_status("正在录音，再点一次即可发送".into());
 }
@@ -523,6 +783,7 @@ async fn finalize_recording(
     };
     if let Some(app) = app_weak.upgrade() {
         app.set_voice_recording(false);
+        feedback(&app);
         app.set_is_busy(true);
         app.set_remote_status("正在完成语音上传".into());
     }
@@ -539,7 +800,13 @@ async fn finalize_recording(
         }
     };
     for pcm in remaining {
+        if state.lock().await.pending_request_id.as_deref() != Some(request_id.as_str()) {
+            return;
+        }
         if let Err(error) = session.send_audio_chunk(request_id.clone(), pcm).await {
+            if state.lock().await.pending_request_id.as_deref() != Some(request_id.as_str()) {
+                return;
+            }
             let _ = session.cancel(request_id.clone()).await;
             if let Some(app) = app_weak.upgrade() {
                 reset_request_ui(&app);
@@ -552,7 +819,11 @@ async fn finalize_recording(
     if let Some(app) = app_weak.upgrade() {
         app.set_remote_status("桌面端正在处理语音".into());
     }
-    match session.finish_audio(request_id.clone()).await {
+    let result = session.finish_audio(request_id.clone()).await;
+    if state.lock().await.pending_request_id.as_deref() != Some(request_id.as_str()) {
+        return;
+    }
+    match result {
         Ok(preview) => publish_preview(&state, &app_weak, preview).await,
         Err(error) if error.code == ale_core::remote::error_code::CANCELLED => {}
         Err(error) => {
@@ -574,6 +845,9 @@ async fn publish_preview(
     preview: CommandPreview,
 ) {
     let mut state = state.lock().await;
+    if state.pending_request_id.as_deref() != Some(preview.request_id.as_str()) {
+        return;
+    }
     state.pending_request_id = preview.has_plan.then(|| preview.request_id.clone());
     drop(state);
     if let Some(app) = app_weak.upgrade() {
@@ -629,12 +903,13 @@ fn finish_confirmation(
     approved: bool,
 ) {
     spawn_local_task(async move {
-        let (session, request_id, decision) = {
+        let (session, request_id, decision, generation) = {
             let mut state = state.lock().await;
             (
                 state.session.clone(),
-                state.pending_request_id.take(),
+                state.pending_request_id.clone(),
                 state.pending_decision.take(),
+                state.session_generation,
             )
         };
         let Some(app) = app_weak.upgrade() else {
@@ -643,10 +918,13 @@ fn finish_confirmation(
         app.set_is_busy(true);
         app.set_show_confirmation(false);
         if let (Some(session), Some(decision)) = (session.clone(), decision) {
-            match session
+            let result = session
                 .respond_to_decision(decision.request_id, decision.decision_id, approved)
-                .await
-            {
+                .await;
+            if state.lock().await.session_generation != generation {
+                return;
+            }
+            match result {
                 Ok(()) => app.set_remote_status(if approved {
                     "已同意，桌面端继续处理".into()
                 } else {
@@ -661,7 +939,17 @@ fn finish_confirmation(
         }
         match (session, request_id) {
             (Some(session), Some(request_id)) => {
-                match session.confirm(request_id, approved).await {
+                let result = session.confirm(request_id.clone(), approved).await;
+                {
+                    let mut current = state.lock().await;
+                    if current.session_generation != generation
+                        || current.pending_request_id.as_deref() != Some(request_id.as_str())
+                    {
+                        return;
+                    }
+                    current.pending_request_id = None;
+                }
+                match result {
                     Ok(status) => {
                         app.set_ai_response(status.message.into());
                         app.set_remote_status(if approved {
@@ -697,6 +985,11 @@ fn wire_disconnect(
 ) {
     let app_weak = app.as_weak();
     app.on_disconnect_remote(move || {
+        if let Some(app) = app_weak.upgrade() {
+            app.set_remote_connected(false);
+            app.set_input_pending(false);
+            app.set_is_busy(true);
+        }
         if let Ok(mut slot) = qr_scan_cancel.lock() {
             if let Some(cancel) = slot.take() {
                 cancel.store(true, Ordering::Release);
@@ -727,6 +1020,8 @@ fn wire_disconnect(
 }
 
 fn reset_request_ui(app: &AppWindow) {
+    app.set_input_pending(false);
+    app.set_confirm_disconnect(false);
     app.set_voice_recording(false);
     app.set_recording_time("00:00 / 01:00".into());
     app.set_show_confirmation(false);

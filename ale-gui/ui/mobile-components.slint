@@ -1,0 +1,168 @@
+export global Theme {
+    in-out property <float> font-scale: 1;
+    out property <color> background: #fffbfe;
+    out property <color> ink: #1c1b1f;
+    out property <color> secondary: #49454f;
+    out property <color> primary: #6750a4;
+    out property <color> surface: #ece6f0;
+    out property <color> outline: #cac4d0;
+}
+
+export component Label inherits Text {
+    color: Theme.ink;
+    font-size: 16px * Theme.font-scale;
+    wrap: word-wrap;
+}
+
+export component ActionButton inherits Rectangle {
+    in property <string> text;
+    in property <bool> enabled: true;
+    in property <bool> primary: false;
+    in property <bool> danger: false;
+    in property <image> icon;
+    in property <bool> has-icon: false;
+    in property <bool> icon-only: false;
+    in property <length> icon-size: 24px;
+    callback clicked();
+    forward-focus: focus;
+    min-height: max(48px, label.preferred-height + 24px);
+    border-radius: root.icon-only ? 38px : 24px;
+    background: !enabled ? Theme.surface : primary ? Theme.primary : #f3edf7;
+    opacity: enabled ? 1 : 0.6;
+    accessible-role: button;
+    accessible-label: text;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    HorizontalLayout {
+        padding: 12px;
+        spacing: 8px;
+        alignment: center;
+        if root.has-icon : Image {
+            source: root.icon;
+            width: root.icon-size;
+            height: root.icon-size;
+            image-fit: contain;
+            colorize: root.primary ? white : Theme.ink;
+        }
+        label := Label {
+            text: root.icon-only ? "" : root.text;
+            visible: !root.icon-only;
+            color: root.primary ? white : root.danger ? #b3261e : Theme.ink;
+            horizontal-alignment: center;
+            vertical-alignment: center;
+        }
+    }
+    touch := TouchArea { enabled: root.enabled; clicked => { focus.focus(); root.clicked(); } }
+    focus := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Theme.primary;
+}
+
+export component ToggleRow inherits Rectangle {
+    in property <string> text;
+    in property <bool> checked;
+    callback toggled();
+    forward-focus: focus;
+    min-height: max(52px, label.preferred-height + 16px);
+    accessible-role: checkbox;
+    accessible-checkable: true;
+    accessible-label: text;
+    accessible-checked: checked;
+    accessible-action-default => { root.toggled(); }
+    HorizontalLayout {
+        spacing: 12px;
+        label := Label { text: root.text; vertical-alignment: center; horizontal-stretch: 1; }
+        Rectangle {
+            width: 52px; height: 32px;
+            border-radius: 16px;
+            background: root.checked ? Theme.primary : Theme.surface;
+            border-width: root.checked ? 0px : 2px;
+            border-color: #79747e;
+            Rectangle {
+                x: root.checked ? 24px : 4px; y: 4px;
+                width: 24px; height: 24px; border-radius: 12px;
+                background: root.checked ? white : #79747e;
+            }
+        }
+    }
+    TouchArea { clicked => { focus.focus(); root.toggled(); } }
+    focus := FocusScope {
+        width: 0px;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" { root.toggled(); return accept; }
+            return reject;
+        }
+    }
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Theme.primary;
+}
+
+export component Card inherits Rectangle {
+    background: white;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: #eee8ef;
+    drop-shadow-blur: 3px;
+    drop-shadow-offset-y: 1px;
+    drop-shadow-color: #00000018;
+    VerticalLayout { padding: 20px; spacing: 12px; @children }
+}
+
+export component StatusChip inherits Rectangle {
+    horizontal-stretch: 0;
+    vertical-stretch: 0;
+    in property <string> text;
+    in property <bool> connected;
+    min-width: label.preferred-width + 24px;
+    min-height: label.preferred-height + 12px;
+    border-radius: 8px;
+    background: connected ? #c3efa5 : Theme.surface;
+    label := Label {
+        x: 12px; y: 6px; width: parent.width - 24px;
+        text: root.text;
+        font-size: 13px * Theme.font-scale;
+        color: root.connected ? #386a20 : Theme.secondary;
+    }
+}
+
+export component NavItem inherits Rectangle {
+    horizontal-stretch: 1;
+    vertical-stretch: 0;
+    in property <string> text;
+    in property <image> icon;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback clicked();
+    forward-focus: focus;
+    min-height: 72px + (Theme.font-scale - 1) * 20px;
+    accessible-role: button;
+    accessible-label: selected ? text + "，已选中" : text;
+    accessible-enabled: enabled;
+    accessible-action-default => { if root.enabled { root.clicked(); } }
+    opacity: enabled ? 1 : 0.5;
+    Rectangle {
+            x: (parent.width - self.width) / 2; y: 8px;
+            width: 56px; height: 32px; border-radius: 16px;
+            background: root.selected ? #e8def8 : transparent;
+            Image { source: root.icon; width: 24px; height: 24px; x: 16px; y: 4px; image-fit: contain; }
+    }
+    Label { y: 44px; width: parent.width; text: root.text; font-size: 12px * Theme.font-scale; horizontal-alignment: center; font-weight: root.selected ? 600 : 400; }
+    TouchArea { enabled: root.enabled; clicked => { focus.focus(); root.clicked(); } }
+    focus := FocusScope {
+        width: 0px;
+        enabled: root.enabled;
+        key-pressed(event) => {
+            if event.text == " " || event.text == "\n" { root.clicked(); return accept; }
+            return reject;
+        }
+    }
+    border-width: focus.has-focus ? 2px : 0px;
+    border-color: Theme.primary;
+}

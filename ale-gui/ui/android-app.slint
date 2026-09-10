@@ -1,28 +1,42 @@
-import { Palette } from "std-widgets.slint";
-import { RemoteVoiceScreen } from "remote-voice.slint";
+import { ScrollView, Spinner } from "std-widgets.slint";
+import { Theme, Label, ActionButton, ToggleRow, Card, StatusChip, NavItem } from "mobile-components.slint";
 
+export enum MobilePage { scan, voice, settings }
 export component AppWindow inherits Window {
     title: "Ale, My Eyes!";
-    preferred-width: 390px;
-    preferred-height: 844px;
-    background: Palette.background;
-
+    preferred-width: 402px;
+    preferred-height: 874px;
+    background: Theme.background;
+    in-out property <MobilePage> current-page: scan;
+    in-out property <float> font-scale: 1;
     in-out property <string> remote-status: "扫描桌面端二维码以开始";
     in-out property <bool> remote-connected: false;
+    in-out property <string> device-name;
+    in-out property <string> device-address;
     in-out property <image> remote-scan-preview;
     in-out property <bool> remote-scanning: false;
     in-out property <bool> voice-recording: false;
     in-out property <bool> is-busy: false;
-    in-out property <string> ai-response: "";
-    in-out property <string> action-steps: "";
+    in-out property <bool> input-pending: false;
+    in-out property <string> ai-response;
+    in-out property <string> action-steps;
     in-out property <bool> show-confirmation: false;
-    in-out property <string> confirmation-text: "";
+    in-out property <string> confirmation-text;
     in-out property <string> confirmation-title: "确认执行";
     in-out property <string> confirmation-confirm-label: "确认执行";
     in-out property <string> confirmation-cancel-label: "取消";
     in-out property <string> recording-time: "00:00 / 01:00";
     in-out property <bool> show-settings-action: false;
-
+    in-out property <bool> speak-results: true;
+    in-out property <bool> haptics: true;
+    in-out property <bool> auto-scan: false;
+    in-out property <bool> english-voice: false;
+    in-out property <string> settings-message;
+    in-out property <string> app-version;
+    in-out property <string> protocol-version;
+    in-out property <bool> confirm-disconnect: false;
+    private property <string> status-label: voice-recording ? "正在录音" : is-busy ? "处理中" : remote-connected ? "已连接" : "未连接";
+    private property <bool> compact-screen: root.height < 600px;
     callback scan-remote();
     callback cancel-remote-scan();
     callback toggle-listening();
@@ -31,35 +45,210 @@ export component AppWindow inherits Window {
     callback cancel-action();
     callback cancel-request();
     callback open-app-settings();
-
-    RemoteVoiceScreen {
-        x: root.safe-area-insets.left;
-        y: root.safe-area-insets.top;
+    callback change-page(MobilePage);
+    callback change-preference(string, bool);
+    callback backgrounded();
+    callback back();
+    changed font-scale => { Theme.font-scale = root.font-scale; }
+    changed show-confirmation => { if root.show-confirmation { dialog.focus(); } else { app-keys.focus(); } }
+    changed confirm-disconnect => { if root.confirm-disconnect { dialog.focus(); } else { app-keys.focus(); } }
+    forward-focus: app-keys;
+    app-keys := FocusScope {
+        key-pressed(event) => {
+            if event.text == Key.Back || event.text == Key.Escape { root.back(); return accept; }
+            return reject;
+        }
+        x: root.safe-area-insets.left; y: root.safe-area-insets.top;
         width: parent.width - root.safe-area-insets.left - root.safe-area-insets.right;
         height: parent.height - root.safe-area-insets.top - root.safe-area-insets.bottom;
-        remote-status: root.remote-status;
-        remote-connected: root.remote-connected;
-        scan-preview: root.remote-scan-preview;
-        scanning: root.remote-scanning;
-        recording: root.voice-recording;
-        busy: root.is-busy;
-        response-text: root.ai-response;
-        action-steps: root.action-steps;
-        show-confirmation: root.show-confirmation;
-        confirmation-text: root.confirmation-text;
-        confirmation-title: root.confirmation-title;
-        confirmation-confirm-label: root.confirmation-confirm-label;
-        confirmation-cancel-label: root.confirmation-cancel-label;
-        recording-time: root.recording-time;
-        show-settings-action: root.show-settings-action;
-
-        scan => { root.scan-remote(); }
-        cancel-scan => { root.cancel-remote-scan(); }
-        toggle-recording => { root.toggle-listening(); }
-        disconnect => { root.disconnect-remote(); }
-        confirm-action => { root.confirm-action(); }
-        cancel-action => { root.cancel-action(); }
-        cancel-request => { root.cancel-request(); }
-        open-settings => { root.open-app-settings(); }
+        FocusScope {
+          width: parent.width; height: parent.height;
+          enabled: !root.show-confirmation && !root.confirm-disconnect;
+          VerticalLayout {
+            spacing: 0px;
+            Rectangle {
+                vertical-stretch: 1;
+                background: root.current-page == MobilePage.scan ? @linear-gradient(160deg, #2a2233, #0e0b14) : Theme.background;
+                Rectangle {
+                    width: min(parent.width, 560px); x: (parent.width - self.width) / 2; height: parent.height;
+                    if root.current-page == MobilePage.scan : ScrollView {
+                        viewport-width: self.width;
+                        VerticalLayout {
+                            padding: 20px; spacing: 20px;
+                            HorizontalLayout {
+                                spacing: 8px;
+                                Rectangle {
+                                    width: 30px; height: 30px; border-radius: 15px; background: Theme.primary;
+                                    Image { source: @image-url("icons/figma-accessibility.svg"); x: 6px; y: 5px; width: 18px; height: 20px; image-fit: contain; }
+                                }
+                                Label { text: "Ale-my-Eyes!"; color: white; font-weight: 700; horizontal-stretch: 1; vertical-alignment: center; }
+                                StatusChip { text: root.status-label; connected: root.remote-connected; }
+                            }
+                            Rectangle { min-height: 16px; vertical-stretch: 1; }
+                            Label { text: root.remote-connected ? "配对成功" : root.remote-scanning ? "扫描二维码" : root.is-busy ? "正在连接" : "连接到电脑"; color: white; font-size: 26px * Theme.font-scale; font-weight: 700; horizontal-alignment: center; }
+                            Label { text: root.remote-connected ? "已接入桌面视觉辅助服务" : "扫描电脑上的配对二维码"; color: #ded8e5; horizontal-alignment: center; }
+                            Rectangle {
+                                height: min(root.width - 72px, 244px);
+                                Rectangle {
+                                width: min(root.width - 72px, 244px); height: self.width; x: (parent.width - self.width) / 2;
+                                border-radius: 28px; border-width: 3px; border-color: root.remote-connected ? #c3efa5 : #cac4d0; background: #ffffff08;
+                                if root.remote-scanning : Image { x: 8px; y: 8px; width: parent.width - 16px; height: parent.height - 16px; source: root.remote-scan-preview; image-fit: contain; }
+                                if root.remote-connected : Rectangle {
+                                    width: 76px; height: 76px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; border-radius: 38px; background: #c3efa5;
+                                    Image { source: @image-url("icons/figma-check.svg"); width: 18.5px; height: 13.5px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; image-fit: contain; }
+                                }
+                                if !root.remote-scanning && !root.remote-connected : Image { source: @image-url("icons/qr-code.svg"); colorize: #ded8e5; width: 64px; height: 64px; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; image-fit: contain; }
+                                }
+                            }
+                            Label { text: root.remote-status; color: #ded8e5; horizontal-alignment: center; }
+                            if root.remote-connected : ActionButton { text: "开始语音控制"; primary: true; clicked => { root.change-page(MobilePage.voice); } }
+                            if !root.remote-connected : ActionButton {
+                                text: root.remote-scanning || root.is-busy ? "取消扫描／连接" : "扫描二维码";
+                                primary: !root.remote-scanning && !root.is-busy;
+                                clicked => { if root.remote-scanning || root.is-busy { root.cancel-remote-scan(); } else { root.scan-remote(); } }
+                            }
+                            if root.show-settings-action : ActionButton { text: "打开系统设置"; clicked => { root.open-app-settings(); } }
+                            Rectangle { min-height: 12px; vertical-stretch: 1; }
+                            if root.remote-connected : Rectangle {
+                                border-radius: 16px; background: #ffffff14;
+                                HorizontalLayout {
+                                    padding: 18px; spacing: 12px;
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        Label { text: root.device-name; color: white; font-weight: 600; }
+                                        Label { text: root.device-address; color: #ded8e5; font-size: 13px * Theme.font-scale; }
+                                    }
+                                    Image { source: @image-url("icons/figma-connected.svg"); width: 44px; height: 44px; image-fit: contain; }
+                                }
+                            }
+                        }
+                    }
+                    if root.current-page == MobilePage.voice : VerticalLayout {
+                        spacing: 0px;
+                        HorizontalLayout {
+                            padding: 20px; spacing: 12px;
+                            Label { text: "语音助手"; font-weight: 700; horizontal-stretch: 1; vertical-alignment: center; }
+                            StatusChip { text: root.status-label; connected: root.remote-connected; }
+                        }
+                        Rectangle { height: 1px; background: Theme.outline; }
+                        ScrollView {
+                            vertical-stretch: 1; viewport-width: self.width;
+                            VerticalLayout {
+                                padding: 20px; spacing: 16px; alignment: start;
+                                Rectangle {
+                                    background: Theme.surface; border-radius: 18px;
+                                    VerticalLayout {
+                                        padding: 16px; spacing: 8px;
+                                        Label { text: root.ai-response == "" ? "语音助手" : "助手回复"; color: #625b71; font-size: 13px * Theme.font-scale; }
+                                        Label { text: root.ai-response != "" ? root.ai-response : root.remote-connected ? "你好。有什么可以帮你？" : "请先连接电脑，再开始语音控制。"; }
+                                    }
+                                }
+                                if root.action-steps != "" : Card { Label { text: "操作预览"; font-weight: 600; } Label { text: root.action-steps; } }
+                                Label { text: root.remote-status; color: Theme.secondary; }
+                                if root.is-busy : Spinner { width: 28px; height: 28px; indeterminate: true; }
+                                if root.is-busy : ActionButton { text: "取消请求"; clicked => { root.cancel-request(); } }
+                                if root.show-settings-action : ActionButton { text: "打开系统设置"; clicked => { root.open-app-settings(); } }
+                            }
+                        }
+                        Rectangle {
+                            background: white;
+                            vertical-stretch: 0;
+                            VerticalLayout {
+                                padding: root.compact-screen ? 8px : 20px; spacing: root.compact-screen ? 8px : 12px;
+                                Label { text: root.voice-recording ? root.recording-time + "\n点击停止并发送" : "点击开始，再次点击停止并发送"; horizontal-alignment: center; color: Theme.secondary; }
+                                if root.remote-connected : Rectangle {
+                                  height: root.compact-screen ? 56px : 76px;
+                                  ActionButton {
+                                    width: root.compact-screen ? 56px : 76px; x: (parent.width - self.width) / 2;
+                                    icon-only: true; icon-size: root.compact-screen ? 32px : 48px;
+                                    text: root.voice-recording ? "停止并发送" : root.input-pending ? "正在准备录音" : "开始说话";
+                                    icon: root.voice-recording ? @image-url("icons/record-stop.svg") : @image-url("icons/figma-microphone.svg"); has-icon: true;
+                                    primary: true; min-height: root.compact-screen ? 56px : 76px; enabled: !root.is-busy && !root.input-pending && !root.show-confirmation;
+                                    clicked => { root.toggle-listening(); }
+                                  }
+                                }
+                                if root.voice-recording : ActionButton { text: "取消录音"; clicked => { root.cancel-request(); } }
+                                if !root.remote-connected : ActionButton { text: "前往扫描连接"; primary: true; clicked => { root.change-page(MobilePage.scan); } }
+                            }
+                        }
+                    }
+                    if root.current-page == MobilePage.settings : ScrollView {
+                        viewport-width: self.width;
+                        VerticalLayout {
+                            padding: 16px; spacing: 16px; alignment: start;
+                            Label { text: "设置"; font-size: 26px * Theme.font-scale; font-weight: 700; }
+                            Label { text: "配对设备与语音偏好"; color: Theme.secondary; }
+                            Card {
+                                Label { text: "语音"; font-weight: 600; }
+                                Rectangle { height: 1px; background: Theme.outline; }
+                                ToggleRow { text: "语音播报结果"; checked: root.speak-results; toggled => { root.change-preference("speak_results", !root.speak-results); } }
+                                ToggleRow { text: "震动反馈"; checked: root.haptics; toggled => { root.change-preference("haptics", !root.haptics); } }
+                                Label { text: "播报语言"; }
+                                HorizontalLayout {
+                                    spacing: 8px;
+                                    ActionButton { text: "中文"; primary: !root.english-voice; clicked => { root.change-preference("english_voice", false); } }
+                                    ActionButton { text: "English"; primary: root.english-voice; clicked => { root.change-preference("english_voice", true); } }
+                                }
+                                Label { text: "仅影响朗读语音，不翻译助手回复"; color: Theme.secondary; font-size: 13px * Theme.font-scale; }
+                            }
+                            Card {
+                                Label { text: "扫码"; font-weight: 600; }
+                                Rectangle { height: 1px; background: Theme.outline; }
+                                ToggleRow { text: "打开即自动扫描"; checked: root.auto-scan; toggled => { root.change-preference("auto_scan", !root.auto-scan); } }
+                                ActionButton {
+                                    text: "断开当前配对设备"; danger: true; enabled: root.remote-connected;
+                                    clicked => { if root.is-busy || root.voice-recording || root.show-confirmation { root.confirm-disconnect = true; } else { root.disconnect-remote(); } }
+                                }
+                            }
+                            Card {
+                                Label { text: "关于"; font-weight: 600; }
+                                Rectangle { height: 1px; background: Theme.outline; }
+                                Label { text: "App 版本    " + root.app-version; }
+                                Label { text: "配对协议    " + root.protocol-version; }
+                            }
+                            if root.settings-message != "" : Label { text: root.settings-message; color: Theme.secondary; }
+                        }
+                    }
+                }
+            }
+            Rectangle {
+                background: #f3edf7;
+                height: 80px + (Theme.font-scale - 1) * 20px;
+                HorizontalLayout {
+                    padding-left: 4px; padding-right: 4px; spacing: 0px;
+                    NavItem { text: "扫描"; icon: @image-url("icons/figma-camera.svg"); selected: root.current-page == MobilePage.scan; enabled: !root.voice-recording && !root.input-pending; clicked => { root.change-page(MobilePage.scan); } }
+                    NavItem { text: "语音"; icon: @image-url("icons/figma-microphone.svg"); selected: root.current-page == MobilePage.voice; enabled: !root.voice-recording && !root.input-pending; clicked => { root.change-page(MobilePage.voice); } }
+                    NavItem { text: "设置"; icon: @image-url("icons/figma-settings.svg"); selected: root.current-page == MobilePage.settings; enabled: !root.voice-recording && !root.input-pending; clicked => { root.change-page(MobilePage.settings); } }
+                }
+            }
+        }
+          }
+        dialog := FocusScope {
+          width: parent.width; height: parent.height;
+          visible: root.show-confirmation || root.confirm-disconnect;
+          enabled: root.show-confirmation || root.confirm-disconnect;
+          Rectangle {
+            background: #00000088;
+            TouchArea { }
+            Rectangle {
+                width: min(parent.width - 32px, 460px); height: min(parent.height - 32px, 460px * Theme.font-scale);
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+                background: Theme.background; border-radius: 24px;
+                VerticalLayout {
+                    padding: 24px; spacing: 16px;
+                    Label { text: root.confirm-disconnect ? "断开连接？" : root.confirmation-title; font-weight: 700; font-size: 22px * Theme.font-scale; }
+                    ScrollView {
+                        vertical-stretch: 1; viewport-width: self.width;
+                        VerticalLayout {
+                            alignment: start;
+                            Label { text: root.confirm-disconnect ? "断开将取消当前任务。确定断开吗？" : root.confirmation-text; }
+                        }
+                    }
+                    ActionButton { text: root.confirm-disconnect ? "断开" : root.confirmation-confirm-label; primary: true; clicked => { if root.confirm-disconnect { root.confirm-disconnect = false; root.disconnect-remote(); } else { root.confirm-action(); } } }
+                    ActionButton { text: root.confirm-disconnect ? "保留连接" : root.confirmation-cancel-label; clicked => { if root.confirm-disconnect { root.confirm-disconnect = false; } else { root.cancel-action(); } } }
+                }
+            }
+          }
+        }
     }
 }
