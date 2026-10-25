@@ -24,7 +24,7 @@ Ale, My Eyes! 是你口袋里的另一位伙伴。我们期待可以帮到你。
 - Android 8.0（API 26）及以上
 - 仅支持 arm64 设备（抱歉了所有的模拟器用户）
 - 需要与桌面端处于同一局域网
-- 仅支持远程协议 v3（旧版本桌面端将被拒绝连接）
+- 仅支持 Misaka-Network 远程协议 v4（旧版本桌面端将被拒绝连接）
 
 ## 开发
 
@@ -57,7 +57,7 @@ AVD 烟雾测试：
 ## 文档
 
 - [Android 架构](docs/ARCHITECTURE.md)
-- [远程协议 v3](docs/REMOTE-PROTOCOL-V3.md)
+- [Misaka-Network 远程协议 v4](docs/REMOTE-PROTOCOL-V4.md)
 - [发布检查清单](docs/ANDROID-RELEASE-CHECKLIST.md)
 - [已知问题](docs/ANDROID-ISSUES.md)
 

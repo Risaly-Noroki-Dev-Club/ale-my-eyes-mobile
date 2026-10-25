@@ -900,12 +900,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_v1_without_fallback() {
-        let server = MockRemoteServer::start(1, MockBehavior::Normal)
+    async fn rejects_older_version_without_fallback() {
+        let server = MockRemoteServer::start(REMOTE_PROTOCOL_VERSION - 1, MockBehavior::Normal)
             .await
             .unwrap();
         let error = match RemoteSession::connect(server.pairing.clone()).await {
-            Ok(_) => panic!("v1 server must be rejected"),
+            Ok(_) => panic!("older-version server must be rejected"),
             Err(error) => error,
         };
         assert_eq!(error.code, error_code::PROTOCOL_INCOMPATIBLE);
@@ -1054,6 +1054,27 @@ mod tests {
         let (request_id, _) = upload(&session, 48_000, 1).await;
         let rejected = session.confirm(request_id, false).await.unwrap();
         assert_eq!(rejected.state, crate::remote::ExecutionState::Cancelled);
+    }
+
+    #[tokio::test]
+    async fn surfaces_v4_outcome_unknown_and_needs_user_states() {
+        for (behavior, expected) in [
+            (
+                MockBehavior::OutcomeUnknown,
+                crate::remote::ExecutionState::OutcomeUnknown,
+            ),
+            (
+                MockBehavior::NeedsUser,
+                crate::remote::ExecutionState::NeedsUser,
+            ),
+        ] {
+            let (_server, session) = connect(behavior).await;
+            let (request_id, preview) = upload(&session, 48_000, 1).await;
+            assert_eq!(preview.task_mode.as_deref(), Some("legacy"));
+            let status = session.confirm(request_id, true).await.unwrap();
+            assert_eq!(status.state, expected);
+            assert!(!status.message.is_empty());
+        }
     }
 
     #[tokio::test]

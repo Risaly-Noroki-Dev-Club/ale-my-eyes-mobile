@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is the independent mobile client for Ale, My Eyes!. The Rust workspace contains `ale-core/`, which owns configuration, cloud APIs, VAD, memory, action plans, and the encrypted remote protocol, and `ale-gui/`, the Slint mobile application. UI definitions live in `ale-gui/ui/`. Android-specific Rust code and resources are under `ale-gui/src/` and `ale-gui/android/res/`; iOS modules use `_ios.rs` names or `platform/ios.rs`. Packaging helpers are in `scripts/`, CI is in `.github/workflows/build.yml`, and technical references are in `docs/`. Do not edit generated `target/`, `ale-gui/android/build/`, or `ale-my-eyes-android/` files.
+This is the independent mobile client for Ale, My Eyes!. The Rust workspace contains `ale-core/`, which owns the portable Misaka-Network v4 protocol types, pairing URI validation, the Noise transport, and the persistent remote-session actor, and `ale-gui/`, the Slint Android application. UI definitions live in `ale-gui/ui/`. Android-specific Rust code and resources are under `ale-gui/src/` and `ale-gui/android/res/`. Packaging helpers are in `scripts/`, CI is in `.github/workflows/build.yml`, and technical references are in `docs/`. Do not edit generated `target/`, `ale-gui/android/build/`, or `ale-my-eyes-android/` files.
 
 ## Build, Test, and Development Commands
 
@@ -12,7 +12,7 @@ This is the independent mobile client for Ale, My Eyes!. The Rust workspace cont
 - `cargo check -p ale-gui --target aarch64-linux-android --lib` checks the Android client; install the Rust target and Android NDK first.
 - `./scripts/package-android.sh` creates the arm64 APK in `ale-my-eyes-android/`. Set `ANDROID_HOME` or `ANDROID_SDK_ROOT`; `ANDROID_NDK_ROOT` is optional when the NDK is installed beneath the SDK.
 
-The GUI crate intentionally compiles only for Android and iOS. A successful host check does not replace the Android target check.
+The GUI crate intentionally targets Android only; a successful host check does not replace the Android target check.
 
 ## Coding Style & Naming Conventions
 

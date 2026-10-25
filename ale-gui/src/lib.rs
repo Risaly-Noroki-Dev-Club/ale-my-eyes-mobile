@@ -8,7 +8,8 @@ mod preferences;
 mod qr_scanner;
 
 use ale_core::remote::{
-    CommandPreview, DecisionRequest, PairingInfo, MAX_AUDIO_CHUNK_BYTES, MAX_RECORDING_SECONDS,
+    CommandPreview, DecisionRequest, ExecutionState, PairingInfo, MAX_AUDIO_CHUNK_BYTES,
+    MAX_RECORDING_SECONDS,
 };
 use ale_core::{RemoteSession, RemoteSessionEvent};
 use slint::ComponentHandle;
@@ -58,10 +59,14 @@ impl AppState {
 pub fn setup_app(app: &AppWindow) {
     app.set_app_version(concat!(env!("CARGO_PKG_VERSION"), " · rear-roi-3").into());
     app.set_protocol_version(
-        format!("ale-my-eyes v{}", ale_core::remote::REMOTE_PROTOCOL_VERSION).into(),
+        format!(
+            "misaka-network v{}",
+            ale_core::remote::REMOTE_PROTOCOL_VERSION
+        )
+        .into(),
     );
     app.set_font_scale(android::font_scale().unwrap_or(1.0));
-    app.set_remote_status("扫描桌面端 v3 二维码以开始".into());
+    app.set_remote_status("扫描桌面端 Misaka-Network v4 二维码以开始".into());
     if let Err(error) = android::initialize_tts() {
         tracing::warn!("Android TTS initialization failed: {}", error);
     }
@@ -335,7 +340,7 @@ fn start_qr_scan(
     app.set_remote_scanning(true);
     app.set_remote_scan_preview(slint::Image::default());
     app.set_camera_label("正在打开后置相机…".into());
-    app.set_remote_status("将电脑上的 v3 二维码放入框内".into());
+    app.set_remote_status("将电脑上的 Misaka-Network v4 二维码放入框内".into());
     let region = Arc::new(std::sync::Mutex::new(camera_frame::ScanRegion::default()));
     let layout_region = region.clone();
     app.on_scan_geometry_changed(move |width, height, size| {
@@ -408,7 +413,7 @@ fn start_qr_scan(
             match scan_result {
                 Ok(pairing) => {
                     app.set_remote_scanning(false);
-                    app.set_remote_status("二维码有效，正在建立 v3 加密会话".into());
+                    app.set_remote_status("二维码有效，正在建立 Misaka-Network v4 加密会话".into());
                     let app_weak = app.as_weak();
                     spawn_local_task(connect_session(
                         pairing,
@@ -570,7 +575,7 @@ async fn connect_session(
             app.set_is_busy(false);
             app.set_remote_status(
                 if error.code == ale_core::remote::error_code::PROTOCOL_INCOMPATIBLE {
-                    "桌面端版本过旧，需要支持远程协议 v3".into()
+                    "桌面端版本过旧，需要支持 Misaka-Network v4".into()
                 } else {
                     slint::format!("连接失败: {}", error.message)
                 },
@@ -887,12 +892,24 @@ async fn publish_preview(
     state.pending_request_id = preview.has_plan.then(|| preview.request_id.clone());
     drop(state);
     if let Some(app) = app_weak.upgrade() {
+        let mut confirmation_text = preview.confirmation_text;
+        if let Some(verification) = preview
+            .verification
+            .as_ref()
+            .filter(|items| !items.is_empty())
+        {
+            confirmation_text.push_str("\n\n验证条件：");
+            for item in verification {
+                confirmation_text.push_str("\n- ");
+                confirmation_text.push_str(item);
+            }
+        }
         app.set_confirmation_title("确认执行".into());
         app.set_confirmation_confirm_label("确认执行".into());
         app.set_confirmation_cancel_label("取消".into());
         app.set_ai_response(preview.response_text.into());
         app.set_action_steps(preview.action_steps.join("\n").into());
-        app.set_confirmation_text(preview.confirmation_text.into());
+        app.set_confirmation_text(confirmation_text.into());
         app.set_show_confirmation(preview.has_plan);
         app.set_remote_status("桌面端已返回结果".into());
     }
@@ -988,11 +1005,20 @@ fn finish_confirmation(
                 match result {
                     Ok(status) => {
                         app.set_ai_response(status.message.into());
-                        app.set_remote_status(if approved {
-                            "桌面端执行完成".into()
-                        } else {
-                            "操作已拒绝".into()
-                        });
+                        let message = match status.state {
+                            ExecutionState::OutcomeUnknown => {
+                                "结果不确定（可能已执行，请勿自动重试）"
+                            }
+                            ExecutionState::NeedsUser => "需要人工接手",
+                            ExecutionState::Failed => "远程操作失败",
+                            ExecutionState::Cancelled => "操作已取消",
+                            ExecutionState::Completed if approved => "桌面端执行完成",
+                            ExecutionState::Completed => "操作已拒绝",
+                            ExecutionState::PreviewReady | ExecutionState::Executing => {
+                                "桌面端执行中"
+                            }
+                        };
+                        app.set_remote_status(message.into());
                     }
                     Err(error) => {
                         if error.code == ale_core::remote::error_code::CONFIRM_TIMEOUT {
@@ -1049,7 +1075,7 @@ fn wire_disconnect(
                 app.set_remote_connected(false);
                 app.set_remote_scanning(false);
                 app.set_is_busy(false);
-                app.set_remote_status("已断开；请重新扫描桌面端 v3 二维码".into());
+                app.set_remote_status("已断开；请重新扫描桌面端 Misaka-Network v4 二维码".into());
             }
         });
     });

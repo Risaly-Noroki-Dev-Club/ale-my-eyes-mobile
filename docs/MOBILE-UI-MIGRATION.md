@@ -2,7 +2,7 @@
 
 Design source: Figma `KxBVpPWMx63te4qE45p205`, frames `2:2` (settings),
 `2:144` (scan), and `2:267` (voice). The implementation keeps Rust/Slint and
-remote protocol v3. No desktop API changes are required.
+Misaka-Network remote protocol v4. No desktop API changes are required.
 
 ## User flow
 
@@ -96,7 +96,7 @@ Camera preview PNGs use a synthetic color chart, not an actual camera feed.
   Android runtime tests. The local package uses the existing test signing key.
 - No Android device was attached and no AVD was configured during migration.
   Camera QR, microphone, TTS locale availability, haptics, permission recovery,
-  lifecycle, real desktop v3 interoperability and system Back need device tests.
+  lifecycle, real desktop v4 interoperability and system Back need device tests.
 - Controls expose Slint accessibility labels, roles, states, keyboard actions
   and modal focus. The current `i-slint-backend-android-activity 1.16.1` source
   has no Android accessibility-tree bridge. **TalkBack usability is not

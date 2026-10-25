@@ -8,7 +8,7 @@ Release is blocked until every required item below has evidence. Store local AVD
   [MOBILE-UI-MIGRATION.md](MOBILE-UI-MIGRATION.md). Host-rendered previews do not
   establish Android accessibility or camera/microphone interoperability.
 
-- [ ] Desktop implements `REMOTE-PROTOCOL-V3.md` without fallback to older versions.
+- [ ] Desktop implements `REMOTE-PROTOCOL-V4.md` without fallback to older versions.
 - [ ] Desktop validates chunk sequence, byte limit, frame count, and SHA-256 before ASR.
 - [ ] Desktop cancellation and disconnect prevent later command execution.
 - [ ] Coordinated desktop/mobile release versions are recorded.
@@ -24,7 +24,7 @@ cargo check -p ale-gui --target aarch64-linux-android --lib
 ```
 
 - [ ] Formatting passes.
-- [ ] All `ale-core` tests pass, including Noise, v1 rejection, audio limits, timeouts, cancellation, wrong IDs, disconnect, and confirmation.
+- [ ] All `ale-core` tests pass, including Noise, older-version rejection, audio limits, timeouts, cancellation, wrong IDs, disconnect, and confirmation.
 - [ ] Host workspace check passes.
 - [ ] Android arm64 target check passes with the release NDK.
 - [ ] `zipalign -c`, `apksigner verify`, package, permission, version, and arm64-only checks pass.
@@ -49,9 +49,9 @@ Run:
 
 This script validates lifecycle behavior. It does not claim camera QR or microphone workflow completion.
 
-## Manual v3 workflow on both AVDs
+## Manual Misaka-Network v4 workflow on both AVDs
 
-For each AVD, use a reachable deterministic v3 desktop and save screenshots/logs for:
+For each AVD, use a reachable deterministic Misaka-Network v4 desktop and save screenshots/logs for:
 
 - [ ] Scan and connect.
 - [ ] First denial and permanent denial for camera and microphone; settings recovery.
@@ -60,6 +60,8 @@ For each AVD, use a reachable deterministic v3 desktop and save screenshots/logs
 - [ ] 60-second recording with automatic end.
 - [ ] Reject preview and receive cancelled status.
 - [ ] Confirm preview and receive completed status.
+- [ ] Receive `outcome_unknown` and confirm the UI never retries automatically.
+- [ ] Receive `needs_user` and confirm the UI hands control to the user.
 - [ ] Cancel while processing.
 - [ ] Preview timeout recovery.
 - [ ] Confirmation timeout recovery.

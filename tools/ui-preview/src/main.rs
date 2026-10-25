@@ -54,7 +54,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
     app.set_remote_scan_preview(slint::Image::from_rgb8(camera_chart));
-    app.set_protocol_version("ale-my-eyes v3".into());
+    app.set_protocol_version("misaka-network v4".into());
     app.set_device_name("桌面工作站".into());
     app.set_device_address("192.168.1.20:7380".into());
     app.show()?;

@@ -23,6 +23,8 @@ pub enum MockBehavior {
     SilentConfirmation,
     LateConfirmation,
     DecisionFlow,
+    OutcomeUnknown,
+    NeedsUser,
 }
 
 pub struct MockRemoteServer {
@@ -42,7 +44,7 @@ impl MockRemoteServer {
             port: address.port(),
             session_id: uuid::Uuid::new_v4().to_string(),
             code: "654321".to_string(),
-            name: "Mock Desktop v3".to_string(),
+            name: "Mock Desktop v4".to_string(),
         };
         let server_pairing = pairing.clone();
         let (shutdown, mut shutdown_rx) = oneshot::channel();
@@ -247,15 +249,23 @@ async fn handle_connection(
                         &mut secure,
                         &RemoteMessage::ExecutionStatus(ExecutionStatus {
                             request_id: confirm.request_id,
-                            state: if confirm.approved {
-                                ExecutionState::Completed
-                            } else {
+                            state: if !confirm.approved {
                                 ExecutionState::Cancelled
-                            },
-                            message: if confirm.approved {
-                                "done"
                             } else {
+                                match behavior {
+                                    MockBehavior::OutcomeUnknown => ExecutionState::OutcomeUnknown,
+                                    MockBehavior::NeedsUser => ExecutionState::NeedsUser,
+                                    _ => ExecutionState::Completed,
+                                }
+                            },
+                            message: if !confirm.approved {
                                 "cancelled"
+                            } else {
+                                match behavior {
+                                    MockBehavior::OutcomeUnknown => "outcome unknown",
+                                    MockBehavior::NeedsUser => "needs user",
+                                    _ => "done",
+                                }
                             }
                             .to_string(),
                             actions_executed: usize::from(confirm.approved),
@@ -317,6 +327,8 @@ fn preview(request_id: String) -> CommandPreview {
         confirmation_text: "confirm mock action".to_string(),
         requires_confirmation: true,
         has_plan: true,
+        task_mode: Some("legacy".to_string()),
+        verification: None,
     }
 }
 
