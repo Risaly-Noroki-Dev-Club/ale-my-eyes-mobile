@@ -1,8 +1,8 @@
 use crate::remote::{
-    AudioEnd, AudioFormat, AudioStart, CommandPreview, DecisionKind, DecisionRequest,
-    ExecutionState, ExecutionStatus, PairingInfo, Ping, Pong, RemoteError, RemoteMessage,
-    ServerHello, MAX_AUDIO_CHUNK_BYTES, MAX_RECORDING_SECONDS, MAX_SAMPLE_RATE_HZ,
-    MIN_SAMPLE_RATE_HZ,
+    AssistantOutput, AssistantOutputKind, AudioEnd, AudioFormat, AudioStart, CommandPreview,
+    DecisionKind, DecisionRequest, ExecutionState, ExecutionStatus, PairingInfo, Ping, Pong,
+    ProgressStage, ProgressUpdate, RemoteError, RemoteMessage, ServerHello, MAX_AUDIO_CHUNK_BYTES,
+    MAX_RECORDING_SECONDS, MAX_SAMPLE_RATE_HZ, MIN_SAMPLE_RATE_HZ,
 };
 use crate::remote_crypto::{server_handshake_reply, SecureChannel};
 use base64::Engine;
@@ -25,6 +25,17 @@ pub enum MockBehavior {
     DecisionFlow,
     OutcomeUnknown,
     NeedsUser,
+    /// Replays the real desktop order: preview, preview speech, confirmation
+    /// progress, terminal status, result speech. Two stale trailing speech
+    /// messages keep the strike counter under test (a handled message must
+    /// reset it, otherwise three rounds would disconnect).
+    DesktopSequence,
+    /// Delays the Noise handshake past the client's whole-handshake deadline.
+    SlowHandshake,
+    /// Sends protocol-legal session-level errors (`request_id: null`).
+    NullSessionErrors,
+    /// Sends queued messages for a request after the client cancelled it.
+    LateAfterCancel,
 }
 
 pub struct MockRemoteServer {
@@ -43,7 +54,9 @@ impl MockRemoteServer {
             host: address.ip().to_string(),
             port: address.port(),
             session_id: uuid::Uuid::new_v4().to_string(),
-            code: "654321".to_string(),
+            // Valid eight-character Crockford Base32 so the printed pairing URI
+            // passes the real client validation (`PairingInfo::from_uri`).
+            code: "M4SKN7Q2".to_string(),
             name: "Mock Desktop v4".to_string(),
         };
         let server_pairing = pairing.clone();
@@ -102,6 +115,9 @@ async fn handle_connection(
     let mut socket = tokio_tungstenite::accept_async(stream)
         .await
         .map_err(|error| error.to_string())?;
+    if behavior == MockBehavior::SlowHandshake {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    }
     let handshake = socket
         .next()
         .await
@@ -228,6 +244,46 @@ async fn handle_connection(
                         )
                         .await?;
                     }
+                    Ok(()) if behavior == MockBehavior::DesktopSequence => {
+                        let request_id = end.request_id;
+                        send_secure(
+                            &mut socket,
+                            &mut secure,
+                            &RemoteMessage::CommandPreview(preview(request_id.clone())),
+                        )
+                        .await?;
+                        // The real desktop always appends one speech message
+                        // right after the preview.
+                        send_secure(
+                            &mut socket,
+                            &mut secure,
+                            &RemoteMessage::AssistantOutput(AssistantOutput {
+                                request_id: Some(request_id),
+                                kind: AssistantOutputKind::Confirmation,
+                                display_text: "预览文本".to_string(),
+                                speech_text: "预览播报".to_string(),
+                                interrupt: false,
+                                sensitive: false,
+                            }),
+                        )
+                        .await?;
+                    }
+                    Ok(()) if behavior == MockBehavior::NullSessionErrors => {
+                        for _ in 0..3 {
+                            send_error(
+                                &mut socket,
+                                &mut secure,
+                                remote_error(None, "INTERNAL_ERROR", "会话级错误"),
+                            )
+                            .await?;
+                        }
+                        send_secure(
+                            &mut socket,
+                            &mut secure,
+                            &RemoteMessage::CommandPreview(preview(end.request_id)),
+                        )
+                        .await?;
+                    }
                     Ok(()) => {
                         send_secure(
                             &mut socket,
@@ -239,8 +295,74 @@ async fn handle_connection(
                     Err(remote) => send_error(&mut socket, &mut secure, remote).await?,
                 }
             }
-            RemoteMessage::ConfirmExecution(confirm) => {
-                if behavior != MockBehavior::SilentConfirmation {
+            RemoteMessage::ConfirmExecution(confirm)
+                if behavior != MockBehavior::SilentConfirmation =>
+            {
+                if behavior == MockBehavior::DesktopSequence {
+                    let request_id = confirm.request_id.clone();
+                    // Confirmation -> progress -> terminal status -> result
+                    // speech, mirroring the real desktop message order.
+                    send_secure(
+                        &mut socket,
+                        &mut secure,
+                        &RemoteMessage::ProgressUpdate(ProgressUpdate {
+                            request_id: request_id.clone(),
+                            stage: ProgressStage::Executing,
+                            message: "正在执行".to_string(),
+                        }),
+                    )
+                    .await?;
+                    send_secure(
+                        &mut socket,
+                        &mut secure,
+                        &RemoteMessage::ExecutionStatus(ExecutionStatus {
+                            request_id: request_id.clone(),
+                            state: if confirm.approved {
+                                ExecutionState::Completed
+                            } else {
+                                ExecutionState::Cancelled
+                            },
+                            message: if confirm.approved {
+                                "done"
+                            } else {
+                                "cancelled"
+                            }
+                            .to_string(),
+                            actions_executed: usize::from(confirm.approved),
+                        }),
+                    )
+                    .await?;
+                    send_secure(
+                        &mut socket,
+                        &mut secure,
+                        &RemoteMessage::AssistantOutput(AssistantOutput {
+                            request_id: Some(request_id),
+                            kind: AssistantOutputKind::Result,
+                            display_text: "结果文本".to_string(),
+                            speech_text: "结果播报".to_string(),
+                            interrupt: true,
+                            sensitive: false,
+                        }),
+                    )
+                    .await?;
+                    // Trailing unknown speech also exercises the strike reset:
+                    // a handled message must clear the run of stray messages.
+                    for suffix in 0..2 {
+                        send_secure(
+                            &mut socket,
+                            &mut secure,
+                            &RemoteMessage::AssistantOutput(AssistantOutput {
+                                request_id: Some(format!("stale-{suffix}")),
+                                kind: AssistantOutputKind::Information,
+                                display_text: "stale".to_string(),
+                                speech_text: "stale".to_string(),
+                                interrupt: false,
+                                sensitive: false,
+                            }),
+                        )
+                        .await?;
+                    }
+                } else {
                     if behavior == MockBehavior::LateConfirmation {
                         tokio::time::sleep(std::time::Duration::from_millis(850)).await;
                     }
@@ -274,6 +396,7 @@ async fn handle_connection(
                     .await?;
                 }
             }
+            RemoteMessage::ConfirmExecution(_) => {}
             RemoteMessage::DecisionResponse(response) => {
                 if pending_decision.as_ref()
                     != Some(&(response.request_id.clone(), response.decision_id.clone()))
@@ -297,14 +420,25 @@ async fn handle_connection(
                     .await?;
                 }
             }
-            RemoteMessage::CancelRequest(cancel) => {
+            RemoteMessage::CancelRequest(cancel) if behavior == MockBehavior::LateAfterCancel => {
                 if audio
                     .as_ref()
                     .is_some_and(|value| value.request_id == cancel.request_id)
                 {
                     audio = None;
                 }
+                for message in late_messages_after_cancel(&cancel.request_id) {
+                    send_secure(&mut socket, &mut secure, &message).await?;
+                }
             }
+            RemoteMessage::CancelRequest(cancel)
+                if audio
+                    .as_ref()
+                    .is_some_and(|value| value.request_id == cancel.request_id) =>
+            {
+                audio = None;
+            }
+            RemoteMessage::CancelRequest(_) => {}
             RemoteMessage::Ping(Ping { nonce }) => {
                 send_secure(
                     &mut socket,
@@ -317,6 +451,39 @@ async fn handle_connection(
         }
     }
     Ok(())
+}
+
+/// Messages a real desktop can still have queued when a cancel reaches it.
+fn late_messages_after_cancel(request_id: &str) -> Vec<RemoteMessage> {
+    vec![
+        RemoteMessage::CommandPreview(preview(request_id.to_string())),
+        RemoteMessage::ProgressUpdate(ProgressUpdate {
+            request_id: request_id.to_string(),
+            stage: ProgressStage::Executing,
+            message: "late progress".to_string(),
+        }),
+        RemoteMessage::ExecutionStatus(ExecutionStatus {
+            request_id: request_id.to_string(),
+            state: ExecutionState::Completed,
+            message: "late status".to_string(),
+            actions_executed: 0,
+        }),
+        RemoteMessage::AssistantOutput(AssistantOutput {
+            request_id: Some(request_id.to_string()),
+            kind: AssistantOutputKind::Result,
+            display_text: "late result".to_string(),
+            speech_text: "late speech".to_string(),
+            interrupt: false,
+            sensitive: false,
+        }),
+        RemoteMessage::DecisionRequest(DecisionRequest {
+            request_id: request_id.to_string(),
+            decision_id: uuid::Uuid::new_v4().to_string(),
+            kind: DecisionKind::UseRemoteModel,
+            prompt: "late decision".to_string(),
+            expires_in_seconds: 30,
+        }),
+    ]
 }
 
 fn preview(request_id: String) -> CommandPreview {

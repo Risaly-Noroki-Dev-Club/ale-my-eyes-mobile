@@ -18,12 +18,12 @@ Version 4 changes the protocol identity together with the message surface:
 The QR payload is:
 
 ```text
-misaka-network://pair?host=<ip>&port=<u16>&sid=<uuid>&code=<six-digits>&name=<display-name>
+misaka-network://pair?host=<ip>&port=<u16>&sid=<uuid>&code=<eight Crockford Base32 chars>&name=<display-name>
 ```
 
 `host` must be a literal IPv4 or IPv6 address. Pairing values are ephemeral and must not be persisted by Android.
 
-The client opens `ws://host:port` and exchanges binary WebSocket frames only. The secure channel uses `Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s`. The 32-byte PSK is SHA-256 over the ASCII bytes `misaka-network-remote-v4` followed immediately by the six-digit code. The label is versioned, so peers built for an older protocol cannot finish Noise; version mismatch error reporting therefore applies only to peers that complete the handshake.
+The client opens `ws://host:port` and exchanges binary WebSocket frames only. The secure channel uses `Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s`. The pairing code is **eight characters of Crockford Base32** (alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ`; the ambiguous letters `I`, `L`, `O` and `U` are never produced), i.e. 40 bits of entropy. The 32-byte PSK is SHA-256 over the ASCII bytes `misaka-network-remote-v4` followed immediately by the upper-case pairing code. Android accepts the code case-insensitively and upper-cases it before deriving the PSK; a code that is not exactly eight characters from that alphabet (including any ambiguous letter) is rejected before a connection is attempted. The label is versioned, so peers built for an older protocol cannot finish Noise; version mismatch error reporting therefore applies only to peers that complete the handshake. Peers that still use the pre-Crockford six-digit code cannot complete the handshake and must be upgraded together.
 
 Handshake order:
 

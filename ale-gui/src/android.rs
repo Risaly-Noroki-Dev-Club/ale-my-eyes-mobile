@@ -288,10 +288,13 @@ pub(crate) fn font_scale() -> Result<f32, String> {
                 &[],
             )?
             .l()?;
+        // Honour system font scaling in both directions: accessibility settings
+        // can shrink text below 1.0 as well as enlarge it. The 3.0 upper bound
+        // keeps the fixed layouts from overflowing.
         Ok(env
             .get_field(&config, "fontScale", "F")?
             .f()?
-            .clamp(1.0, 3.0))
+            .clamp(0.5, 3.0))
     })
 }
 
@@ -493,6 +496,28 @@ pub(crate) fn display_rotation() -> Result<u32, String> {
             clear_pending_exception(&mut env);
             format!("无法读取屏幕方向: {error}")
         })
+}
+
+/// Human-readable device model (Android `Build.MODEL`), used as the
+/// `ClientHello.device_name` so the desktop can tell phones apart.
+pub(crate) fn device_model() -> Option<String> {
+    let model = with_android(|env, _activity| {
+        let value = env
+            .get_static_field("android/os/Build", "MODEL", "Ljava/lang/String;")?
+            .l()?;
+        if value.is_null() {
+            return Ok(String::new());
+        }
+        let text: jni::objects::JString = value.into();
+        let model: String = env.get_string(&text)?.into();
+        Ok(model)
+    })
+    .ok()?;
+    let model = model.trim();
+    if model.is_empty() {
+        return None;
+    }
+    Some(model.chars().take(64).collect())
 }
 
 fn current_app() -> Result<slint::android::AndroidApp, String> {

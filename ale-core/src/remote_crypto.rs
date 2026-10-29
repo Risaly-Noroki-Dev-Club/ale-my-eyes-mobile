@@ -218,8 +218,8 @@ mod tests {
     use crate::remote::{Ping, RemoteMessage};
 
     fn channel_pair() -> (SecureChannel, SecureChannel) {
-        let (initiator, first) = client_handshake_message("123456").unwrap();
-        let (server, reply) = server_handshake_reply("123456", &first).unwrap();
+        let (initiator, first) = client_handshake_message("7Q2M9X4B").unwrap();
+        let (server, reply) = server_handshake_reply("7Q2M9X4B", &first).unwrap();
         let client = client_finish_handshake(initiator, &reply).unwrap();
         (client, server)
     }
@@ -242,8 +242,8 @@ mod tests {
 
     #[test]
     fn noise_roundtrip() {
-        let (initiator, first) = client_handshake_message("123456").unwrap();
-        let (mut server, reply) = server_handshake_reply("123456", &first).unwrap();
+        let (initiator, first) = client_handshake_message("7Q2M9X4B").unwrap();
+        let (mut server, reply) = server_handshake_reply("7Q2M9X4B", &first).unwrap();
         let mut client = client_finish_handshake(initiator, &reply).unwrap();
         let encrypted = client
             .encrypt_message(&RemoteMessage::Ping(Ping { nonce: 42 }))
@@ -258,8 +258,8 @@ mod tests {
 
     #[test]
     fn fragmented_message_roundtrips() {
-        let (initiator, first) = client_handshake_message("123456").unwrap();
-        let (mut server, reply) = server_handshake_reply("123456", &first).unwrap();
+        let (initiator, first) = client_handshake_message("7Q2M9X4B").unwrap();
+        let (mut server, reply) = server_handshake_reply("7Q2M9X4B", &first).unwrap();
         let mut client = client_finish_handshake(initiator, &reply).unwrap();
         let message = RemoteMessage::Error(crate::remote::RemoteError {
             request_id: Some("long-preview".to_string()),
@@ -282,8 +282,8 @@ mod tests {
 
     #[test]
     fn rejects_message_over_total_limit() {
-        let (initiator, first) = client_handshake_message("123456").unwrap();
-        let (_server, reply) = server_handshake_reply("123456", &first).unwrap();
+        let (initiator, first) = client_handshake_message("7Q2M9X4B").unwrap();
+        let (_server, reply) = server_handshake_reply("7Q2M9X4B", &first).unwrap();
         let mut client = client_finish_handshake(initiator, &reply).unwrap();
         let message = RemoteMessage::Error(crate::remote::RemoteError {
             request_id: None,
@@ -345,13 +345,13 @@ mod tests {
     #[test]
     fn misaka_v4_wire_constants_are_pinned() {
         assert_eq!(CHUNK_MAGIC, b"MSKN");
-        let psk = psk_from_code("123456");
+        let psk = psk_from_code("7Q2M9X4B");
         assert_eq!(
             psk,
             [
-                0x10, 0xb8, 0x2c, 0x86, 0x6c, 0xdc, 0x0a, 0xa8, 0x54, 0x60, 0x13, 0x48, 0x3a, 0x93,
-                0xd7, 0x61, 0x7e, 0xa2, 0x9e, 0x82, 0xca, 0xc2, 0x3d, 0x41, 0xd0, 0xc5, 0x49, 0xd5,
-                0x13, 0xb1, 0xb2, 0xf6
+                0x4a, 0xcd, 0xbc, 0x52, 0x7b, 0x69, 0xb9, 0x40, 0x7c, 0x5c, 0x9f, 0x36, 0xc7, 0xb2,
+                0x27, 0x1f, 0xb1, 0xfc, 0x49, 0xf1, 0x8b, 0xf1, 0x97, 0x54, 0x6a, 0x09, 0xe1, 0xf9,
+                0xf7, 0x31, 0x84, 0x33
             ]
         );
     }

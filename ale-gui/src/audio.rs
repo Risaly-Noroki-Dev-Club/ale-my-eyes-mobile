@@ -5,8 +5,13 @@ use oboe::{
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const REQUESTED_SAMPLE_RATE_HZ: i32 = 48_000;
+/// How long the real-time callback spins for the drain lock before accepting a
+/// blocking acquire. The UI thread holds the lock only for a bounded drain, so
+/// normal contention must not be mistaken for a buffer overflow.
+const LOCK_CONTENTION_BUDGET: Duration = Duration::from_millis(2);
 const MAX_BUFFER_SECONDS: usize = 2;
 const STARTUP_BUFFER_LIMIT: usize = 96_000 * MAX_BUFFER_SECONDS;
 
@@ -142,9 +147,33 @@ impl AudioInputCallback for RecorderCallback {
         _stream: &mut dyn AudioInputStreamSafe,
         frames: &[f32],
     ) -> DataCallbackResult {
-        let Ok(mut buffer) = self.samples.try_lock() else {
-            self.overflowed.store(true, Ordering::Release);
-            return DataCallbackResult::Stop;
+        let mut buffer = match self.samples.try_lock() {
+            Ok(buffer) => buffer,
+            Err(std::sync::TryLockError::WouldBlock) => {
+                // The UI drain holds this lock for a bounded amount of work.
+                // Spin briefly, then block instead of stopping the stream:
+                // only genuine overflow (size limit) stops recording.
+                let deadline = Instant::now() + LOCK_CONTENTION_BUDGET;
+                loop {
+                    std::thread::yield_now();
+                    if let Ok(buffer) = self.samples.try_lock() {
+                        break buffer;
+                    }
+                    if Instant::now() >= deadline {
+                        match self.samples.lock() {
+                            Ok(buffer) => break buffer,
+                            Err(_) => {
+                                self.overflowed.store(true, Ordering::Release);
+                                return DataCallbackResult::Stop;
+                            }
+                        }
+                    }
+                }
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                self.overflowed.store(true, Ordering::Release);
+                return DataCallbackResult::Stop;
+            }
         };
         let limit = self.max_buffered_samples.load(Ordering::Acquire);
         if buffer.len().saturating_add(frames.len()) > limit {

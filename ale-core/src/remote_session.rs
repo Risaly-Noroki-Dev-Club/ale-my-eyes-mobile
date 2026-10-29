@@ -16,6 +16,12 @@ use tokio::time::{Instant, MissedTickBehavior};
 use tokio_tungstenite::tungstenite::Message;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
+/// Whole connect + Noise handshake + Hello exchange budget, matching the
+/// eight-second handshake promised by the protocol documentation.
+#[cfg(not(test))]
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(8);
+#[cfg(test)]
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(2);
 const SEND_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(not(test))]
 const PREVIEW_TIMEOUT: Duration = Duration::from_secs(90);
@@ -29,6 +35,17 @@ const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(15);
 const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_UNEXPECTED_RESPONSES: u8 = 3;
 const MAX_RETIRED_REQUEST_IDS: usize = 64;
+/// How long a client-initiated request is remembered for desktop follow-up
+/// messages. Must cover the 90-second preview deadline plus the 30-second
+/// confirmation deadline and a tail for the desktop's post-result speech.
+const KNOWN_REQUEST_TTL: Duration = Duration::from_secs(180);
+const MAX_KNOWN_REQUEST_IDS: usize = 64;
+
+/// A request this client started, still inside its known-message window.
+struct KnownRequest {
+    request_id: String,
+    expires_at: Instant,
+}
 
 type Socket =
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
@@ -52,7 +69,9 @@ impl RemoteSessionError {
 #[derive(Debug, Clone)]
 pub enum RemoteSessionEvent {
     Disconnected(RemoteSessionError),
-    ProtocolWarning(String),
+    /// A protocol-legal session-level error (`error.request_id` is `null`).
+    /// The socket stays open; the UI should surface the message.
+    SessionError(RemoteSessionError),
     Progress(ProgressUpdate),
     DecisionRequested(DecisionRequest),
     AssistantOutput(AssistantOutput),
@@ -67,6 +86,24 @@ pub struct RemoteSession {
 
 impl RemoteSession {
     pub async fn connect(pairing: PairingInfo) -> Result<Self, RemoteSessionError> {
+        Self::connect_with_device_name(pairing, "Android".to_string()).await
+    }
+
+    /// Connects while introducing this client with `device_name`, so the desktop
+    /// can tell devices apart (the Android UI passes `Build.MODEL`).
+    pub async fn connect_with_device_name(
+        pairing: PairingInfo,
+        device_name: String,
+    ) -> Result<Self, RemoteSessionError> {
+        tokio::time::timeout(HANDSHAKE_TIMEOUT, Self::connect_inner(pairing, device_name))
+            .await
+            .map_err(|_| error("HANDSHAKE_TIMEOUT", "桌面端握手超时（8 秒总时限）"))?
+    }
+
+    async fn connect_inner(
+        pairing: PairingInfo,
+        client_name: String,
+    ) -> Result<Self, RemoteSessionError> {
         let (mut socket, _) = tokio::time::timeout(
             CONNECT_TIMEOUT,
             tokio_tungstenite::connect_async(pairing.websocket_url()),
@@ -109,7 +146,7 @@ impl RemoteSession {
             &mut secure,
             &RemoteMessage::ClientHello(ClientHello {
                 protocol_version: REMOTE_PROTOCOL_VERSION,
-                device_name: "Android".to_string(),
+                device_name: client_name,
             }),
         )
         .await?;
@@ -286,6 +323,7 @@ async fn run_session(
     let mut active_audio: Option<AudioUpload> = None;
     let mut pending_preview: Option<PendingPreview> = None;
     let mut pending_execution: Option<PendingExecution> = None;
+    let mut known_requests: VecDeque<KnownRequest> = VecDeque::new();
     let mut retired_request_ids = VecDeque::new();
     let mut unexpected_responses = 0_u8;
     let mut last_seen = Instant::now();
@@ -308,6 +346,8 @@ async fn run_session(
                     &mut active_audio,
                     &mut pending_preview,
                     &mut pending_execution,
+                    &mut known_requests,
+                    &mut retired_request_ids,
                 ).await {
                     break value;
                 }
@@ -334,6 +374,7 @@ async fn run_session(
                     &mut secure,
                     &mut pending_preview,
                     &mut pending_execution,
+                    &known_requests,
                     &retired_request_ids,
                     &mut unexpected_responses,
                     &events,
@@ -344,15 +385,24 @@ async fn run_session(
             }
             _ = maintenance.tick() => {
                 let now = Instant::now();
+                expire_known_requests(&mut known_requests, &mut retired_request_ids, now);
                 if pending_preview.as_ref().is_some_and(|pending| pending.deadline <= now) {
                     if let Some(pending) = pending_preview.take() {
-                        retire_request_id(&mut retired_request_ids, pending.request_id.clone());
+                        retire_request(
+                            &mut known_requests,
+                            &mut retired_request_ids,
+                            pending.request_id,
+                        );
                         let _ = pending.reply.send(Err(error(error_code::REQUEST_TIMEOUT, "桌面端处理语音超时")));
                     }
                 }
                 if pending_execution.as_ref().is_some_and(|pending| pending.deadline <= now) {
                     if let Some(pending) = pending_execution.take() {
-                        retire_request_id(&mut retired_request_ids, pending.request_id.clone());
+                        retire_request(
+                            &mut known_requests,
+                            &mut retired_request_ids,
+                            pending.request_id,
+                        );
                         let _ = pending.reply.send(Err(error(
                             error_code::CONFIRM_TIMEOUT,
                             "桌面端执行超时，执行结果未知；为避免重复操作，请先检查桌面端",
@@ -386,6 +436,7 @@ async fn run_session(
     events.send_replace(Some(RemoteSessionEvent::Disconnected(final_error)));
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_command(
     command: SessionCommand,
     socket: &mut Socket,
@@ -393,6 +444,8 @@ async fn handle_command(
     active_audio: &mut Option<AudioUpload>,
     pending_preview: &mut Option<PendingPreview>,
     pending_execution: &mut Option<PendingExecution>,
+    known_requests: &mut VecDeque<KnownRequest>,
+    retired_request_ids: &mut VecDeque<String>,
 ) -> Option<RemoteSessionError> {
     match command {
         SessionCommand::BeginAudio {
@@ -401,6 +454,9 @@ async fn handle_command(
             reply,
         } => {
             let result = begin_audio(socket, secure, active_audio, sample_rate_hz, channels).await;
+            if let Ok(request_id) = &result {
+                remember_request(known_requests, request_id.clone());
+            }
             let terminal = result
                 .as_ref()
                 .err()
@@ -438,6 +494,9 @@ async fn handle_command(
                     None
                 }
                 Err(value) => {
+                    // The request is abandoned: keep late desktop messages for it
+                    // silent instead of counting protocol strikes.
+                    retire_request(known_requests, retired_request_ids, request_id);
                     let terminal = is_transport_error(&value).then(|| value.clone());
                     let _ = reply.send(Err(value));
                     terminal
@@ -497,6 +556,9 @@ async fn handle_command(
                 request_id: request_id.clone(),
             });
             let result = send_secure(socket, secure, &message).await;
+            // Anything the desktop already queued for this request may still
+            // arrive; treat it as exhausted instead of a protocol strike.
+            retire_request(known_requests, retired_request_ids, request_id.clone());
             if active_audio
                 .as_ref()
                 .is_some_and(|upload| upload.request_id == request_id)
@@ -623,6 +685,16 @@ async fn finish_audio(
     }
     let upload = active_audio.take().expect("active upload checked");
     if upload.total_pcm_bytes == 0 {
+        // Tell the desktop to drop its assembler; otherwise the next AudioStart
+        // hits AUDIO_BUSY and its chunks count as protocol strikes.
+        let _ = send_secure(
+            socket,
+            secure,
+            &RemoteMessage::CancelRequest(CancelRequest {
+                request_id: upload.request_id.clone(),
+            }),
+        )
+        .await;
         return Err(error("EMPTY_AUDIO", "没有录到音频"));
     }
     let bytes_per_frame = u64::from(upload.channels) * 2;
@@ -642,6 +714,7 @@ async fn handle_remote_message(
     secure: &mut SecureChannel,
     pending_preview: &mut Option<PendingPreview>,
     pending_execution: &mut Option<PendingExecution>,
+    known_requests: &VecDeque<KnownRequest>,
     retired_request_ids: &VecDeque<String>,
     unexpected_responses: &mut u8,
     events: &watch::Sender<Option<RemoteSessionEvent>>,
@@ -679,48 +752,67 @@ async fn handle_remote_message(
                 false
             }
         }
-        RemoteMessage::ProgressUpdate(progress)
-            if pending_preview
-                .as_ref()
-                .is_some_and(|pending| pending.request_id == progress.request_id) =>
-        {
-            events.send_replace(Some(RemoteSessionEvent::Progress(progress)));
-            true
+        RemoteMessage::ProgressUpdate(progress) => {
+            if retired_request_ids.contains(&progress.request_id) {
+                tracing::debug!(request_id = %progress.request_id, "Ignored late progress update");
+                return Ok(());
+            }
+            // The desktop sends `Executing`/`Verified*` progress after the preview
+            // was delivered (while `pending_execution` is active), so the known
+            // request window - not only `pending_preview` - decides routing.
+            if is_known_request(known_requests, &progress.request_id) {
+                events.send_replace(Some(RemoteSessionEvent::Progress(progress)));
+                true
+            } else {
+                false
+            }
         }
-        RemoteMessage::DecisionRequest(decision)
-            if pending_preview
-                .as_ref()
-                .is_some_and(|pending| pending.request_id == decision.request_id) =>
-        {
-            events.send_replace(Some(RemoteSessionEvent::DecisionRequested(decision)));
-            true
+        RemoteMessage::DecisionRequest(decision) => {
+            if retired_request_ids.contains(&decision.request_id) {
+                tracing::debug!(request_id = %decision.request_id, "Ignored late decision request");
+                return Ok(());
+            }
+            if is_known_request(known_requests, &decision.request_id) {
+                // The UI only renders a decision while it still owns the request.
+                events.send_replace(Some(RemoteSessionEvent::DecisionRequested(decision)));
+                true
+            } else {
+                false
+            }
         }
-        RemoteMessage::AssistantOutput(output)
-            if output.request_id.is_none()
-                || output.request_id.as_ref().is_some_and(|request_id| {
-                    pending_preview
-                        .as_ref()
-                        .is_some_and(|pending| pending.request_id == *request_id)
-                        || pending_execution
-                            .as_ref()
-                            .is_some_and(|pending| pending.request_id == *request_id)
-                }) =>
-        {
-            events.send_replace(Some(RemoteSessionEvent::AssistantOutput(output)));
-            true
-        }
-        RemoteMessage::Error(remote)
-            if remote
-                .request_id
-                .as_ref()
-                .is_some_and(|request_id| retired_request_ids.contains(request_id)) =>
-        {
-            tracing::warn!(request_id = ?remote.request_id, code = %remote.code, "Ignored late remote error");
-            return Ok(());
-        }
-        RemoteMessage::Error(remote) => {
-            route_remote_error(remote, pending_preview, pending_execution)
-        }
+        RemoteMessage::AssistantOutput(output) => match output.request_id.clone() {
+            None => {
+                events.send_replace(Some(RemoteSessionEvent::AssistantOutput(output)));
+                true
+            }
+            Some(request_id) if retired_request_ids.contains(&request_id) => {
+                tracing::debug!(request_id = %request_id, "Ignored late assistant output");
+                return Ok(());
+            }
+            Some(request_id) if is_known_request(known_requests, &request_id) => {
+                // The desktop appends Confirmation/Information/Result speech to
+                // preview and terminal messages; it must reach the UI (TTS).
+                events.send_replace(Some(RemoteSessionEvent::AssistantOutput(output)));
+                true
+            }
+            Some(_) => false,
+        },
+        RemoteMessage::Error(remote) => match remote.request_id.clone() {
+            None => {
+                // `request_id: null` is a session-level error in the protocol: it
+                // is surfaced to the UI and never counts as a protocol strike.
+                events.send_replace(Some(RemoteSessionEvent::SessionError(error(
+                    remote.code,
+                    remote.message,
+                ))));
+                true
+            }
+            Some(request_id) if retired_request_ids.contains(&request_id) => {
+                tracing::warn!(%request_id, code = %remote.code, "Ignored late remote error");
+                return Ok(());
+            }
+            Some(_) => route_remote_error(remote, pending_preview, pending_execution),
+        },
         RemoteMessage::Ping(Ping { nonce }) => {
             send_secure(socket, secure, &RemoteMessage::Pong(Pong { nonce })).await?;
             true
@@ -729,6 +821,9 @@ async fn handle_remote_message(
         _ => false,
     };
     if matched {
+        // Align with the desktop server: every handled message restarts the run
+        // of unrouteable messages instead of accumulating for the session.
+        *unexpected_responses = 0;
         return Ok(());
     }
     *unexpected_responses = unexpected_responses.saturating_add(1);
@@ -745,6 +840,49 @@ async fn handle_remote_message(
     Ok(())
 }
 
+fn is_known_request(known: &VecDeque<KnownRequest>, request_id: &str) -> bool {
+    known.iter().any(|entry| entry.request_id == request_id)
+}
+
+fn remember_request(known: &mut VecDeque<KnownRequest>, request_id: String) {
+    known.retain(|entry| entry.request_id != request_id);
+    while known.len() >= MAX_KNOWN_REQUEST_IDS {
+        known.pop_front();
+    }
+    known.push_back(KnownRequest {
+        request_id,
+        expires_at: Instant::now() + KNOWN_REQUEST_TTL,
+    });
+}
+
+fn forget_request(known: &mut VecDeque<KnownRequest>, request_id: &str) {
+    known.retain(|entry| entry.request_id != request_id);
+}
+
+fn expire_known_requests(
+    known: &mut VecDeque<KnownRequest>,
+    retired: &mut VecDeque<String>,
+    now: Instant,
+) {
+    while known.front().is_some_and(|entry| entry.expires_at <= now) {
+        let Some(entry) = known.pop_front() else {
+            break;
+        };
+        // Expired requests are exhausted: very late answers are logged and
+        // ignored rather than turned into protocol strikes.
+        retire_request_id(retired, entry.request_id);
+    }
+}
+
+fn retire_request(
+    known: &mut VecDeque<KnownRequest>,
+    retired: &mut VecDeque<String>,
+    request_id: String,
+) {
+    forget_request(known, &request_id);
+    retire_request_id(retired, request_id);
+}
+
 fn retire_request_id(retired: &mut VecDeque<String>, request_id: String) {
     if retired.contains(&request_id) {
         return;
@@ -753,6 +891,18 @@ fn retire_request_id(retired: &mut VecDeque<String>, request_id: String) {
         retired.pop_front();
     }
     retired.push_back(request_id);
+}
+
+/// Truncates a PCM16 chunk to `remaining_bytes`, keeping complete two-byte
+/// frames. Returns `true` when the chunk hit the recording limit and the caller
+/// must stop recording after sending whatever remains.
+pub fn truncate_pcm_to_limit(pcm: &mut Vec<u8>, remaining_bytes: u64) -> bool {
+    let remaining = usize::try_from(remaining_bytes).unwrap_or(usize::MAX);
+    if pcm.len() <= remaining {
+        return false;
+    }
+    pcm.truncate(remaining & !1);
+    true
 }
 
 fn route_remote_error(
@@ -1131,5 +1281,139 @@ mod tests {
             events.borrow().as_ref(),
             Some(RemoteSessionEvent::Disconnected(_))
         ));
+    }
+
+    async fn wait_for_event(
+        events: &mut watch::Receiver<Option<RemoteSessionEvent>>,
+        mut predicate: impl FnMut(&RemoteSessionEvent) -> bool,
+    ) -> RemoteSessionEvent {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(event) = events.borrow_and_update().clone() {
+                if predicate(&event) {
+                    return event;
+                }
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            assert!(!remaining.is_zero(), "等待远程会话事件超时");
+            let _ = tokio::time::timeout(remaining, events.changed()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn routes_desktop_message_order_without_protocol_strikes() {
+        // Desktop order: preview -> AssistantOutput(Confirmation) -> progress ->
+        // terminal status -> AssistantOutput(Result) -> stale speech. Three
+        // rounds plus the stale messages only pass when known requests are
+        // routed, speech reaches the UI, and handled messages reset the strikes.
+        let (_server, session) = connect(MockBehavior::DesktopSequence).await;
+        let mut events = session.subscribe();
+        for _ in 0..3 {
+            let (request_id, preview) = upload(&session, 48_000, 1).await;
+            assert_eq!(preview.request_id, request_id);
+            wait_for_event(&mut events, |event| {
+                matches!(
+                    event,
+                    RemoteSessionEvent::AssistantOutput(output) if output.speech_text == "预览播报"
+                )
+            })
+            .await;
+            let status = session.confirm(request_id, true).await.unwrap();
+            assert_eq!(status.state, crate::remote::ExecutionState::Completed);
+            wait_for_event(&mut events, |event| {
+                matches!(
+                    event,
+                    RemoteSessionEvent::AssistantOutput(output) if output.speech_text == "结果播报"
+                )
+            })
+            .await;
+        }
+        // Still connected after the whole exchange.
+        let request_id = session.begin_audio(48_000, 1).await.unwrap();
+        session.cancel(request_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn session_level_errors_are_reported_and_never_strike() {
+        let (_server, session) = connect(MockBehavior::NullSessionErrors).await;
+        let mut events = session.subscribe();
+        let (request_id, preview) = upload(&session, 48_000, 1).await;
+        assert_eq!(preview.request_id, request_id);
+        wait_for_event(&mut events, |event| {
+            matches!(
+                event,
+                RemoteSessionEvent::SessionError(error) if error.code == "INTERNAL_ERROR"
+            )
+        })
+        .await;
+        // Three null-request-id errors would have closed the session before.
+        let request_id = session.begin_audio(48_000, 1).await.unwrap();
+        session.cancel(request_id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn handshake_has_a_whole_exchange_deadline() {
+        let server = MockRemoteServer::start(REMOTE_PROTOCOL_VERSION, MockBehavior::SlowHandshake)
+            .await
+            .unwrap();
+        let error = match RemoteSession::connect(server.pairing.clone()).await {
+            Ok(_) => panic!("slow handshake must hit the whole-exchange deadline"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code, "HANDSHAKE_TIMEOUT");
+    }
+
+    #[tokio::test]
+    async fn connects_with_a_configurable_device_name() {
+        let server = MockRemoteServer::start(REMOTE_PROTOCOL_VERSION, MockBehavior::Normal)
+            .await
+            .unwrap();
+        let session =
+            RemoteSession::connect_with_device_name(server.pairing.clone(), "Pixel 7".to_string())
+                .await
+                .unwrap();
+        session.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn empty_audio_cancels_the_desktop_assembler() {
+        let (_server, session) = connect(MockBehavior::Normal).await;
+        let request_id = session.begin_audio(48_000, 1).await.unwrap();
+        let error = session.finish_audio(request_id).await.unwrap_err();
+        assert_eq!(error.code, "EMPTY_AUDIO");
+        // Without the outgoing CancelRequest the next AudioStart would receive
+        // AUDIO_BUSY and every following chunk would fail.
+        let (request_id, preview) = upload(&session, 48_000, 1).await;
+        assert_eq!(preview.request_id, request_id);
+    }
+
+    #[tokio::test]
+    async fn cancel_retires_late_desktop_messages_without_strikes() {
+        let (_server, session) = connect(MockBehavior::LateAfterCancel).await;
+        let (request_id, _preview) = upload(&session, 48_000, 1).await;
+        session.cancel(request_id).await.unwrap();
+        // Five queued messages for the cancelled request arrive; none may strike.
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        let (request_id, preview) = upload(&session, 48_000, 1).await;
+        assert_eq!(preview.request_id, request_id);
+    }
+
+    #[test]
+    fn pcm_truncation_respects_the_recording_limit() {
+        let mut pcm = vec![0_u8; 10];
+        assert!(!truncate_pcm_to_limit(&mut pcm, 10));
+        assert_eq!(pcm.len(), 10);
+
+        let mut pcm = vec![0_u8; 10];
+        assert!(truncate_pcm_to_limit(&mut pcm, 5));
+        assert_eq!(pcm.len(), 4);
+
+        let mut pcm = vec![0_u8; 10];
+        assert!(truncate_pcm_to_limit(&mut pcm, 0));
+        assert!(pcm.is_empty());
+
+        let mut pcm = vec![0_u8; 10];
+        assert!(!truncate_pcm_to_limit(&mut pcm, u64::MAX));
+        assert_eq!(pcm.len(), 10);
     }
 }

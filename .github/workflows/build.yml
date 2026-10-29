@@ -17,6 +17,8 @@ permissions:
   contents: read
 
 env:
+  # Keep in sync with scripts/package-android.sh DEFAULT_NDK_VERSION and the
+  # NDK recorded in docs/ANDROID-ISSUES.md.
   ANDROID_NDK_VERSION: 27.3.13750724
   ANDROID_BUILD_TOOLS_VERSION: 35.0.0
 

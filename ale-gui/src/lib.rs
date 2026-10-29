@@ -22,6 +22,11 @@ use tokio::sync::Mutex;
 
 slint::include_modules!();
 
+/// Stop capturing two seconds before the protocol's hard 60-second cap so the
+/// final drain (at most one tick of buffered samples) can never push the upload
+/// past `sample_rate * channels * 2 * 60` bytes.
+const AUTO_STOP_RECORDING_SECONDS: u64 = MAX_RECORDING_SECONDS - 2;
+
 struct AppState {
     session: Option<RemoteSession>,
     session_generation: u64,
@@ -30,6 +35,8 @@ struct AppState {
     pending_request_id: Option<String>,
     pending_decision: Option<DecisionRequest>,
     recording_started: Option<Instant>,
+    recording_bytes: u64,
+    recording_byte_limit: u64,
     cancelled_requests: std::collections::VecDeque<String>,
 }
 
@@ -43,6 +50,8 @@ impl AppState {
             pending_request_id: None,
             pending_decision: None,
             recording_started: None,
+            recording_bytes: 0,
+            recording_byte_limit: 0,
             cancelled_requests: std::collections::VecDeque::new(),
         }
     }
@@ -53,6 +62,8 @@ impl AppState {
         self.pending_request_id = None;
         self.pending_decision = None;
         self.recording_started = None;
+        self.recording_bytes = 0;
+        self.recording_byte_limit = 0;
     }
 }
 
@@ -441,7 +452,8 @@ async fn connect_session(
     scan_token: Arc<AtomicBool>,
 ) {
     let address = format!("{}:{}", pairing.host, pairing.port);
-    let result = RemoteSession::connect(pairing).await;
+    let device_name = android::device_model().unwrap_or_else(|| "Android".to_string());
+    let result = RemoteSession::connect_with_device_name(pairing, device_name).await;
     if scan_token.load(Ordering::Acquire) {
         if let Ok(session) = result {
             session.shutdown().await;
@@ -510,8 +522,18 @@ async fn connect_session(
                             }
                             return;
                         }
-                        Some(RemoteSessionEvent::ProtocolWarning(message)) => {
-                            tracing::warn!("Remote protocol warning: {}", message);
+                        Some(RemoteSessionEvent::SessionError(error)) => {
+                            if let Some(app) = app_weak.upgrade() {
+                                app.set_remote_status(slint::format!(
+                                    "桌面端错误: {}",
+                                    error.message
+                                ));
+                                if app.get_speak_results() {
+                                    if let Err(error) = android::speak(&error.message, false) {
+                                        tracing::warn!("Android TTS failed: {}", error);
+                                    }
+                                }
+                            }
                         }
                         Some(RemoteSessionEvent::Progress(progress)) => {
                             if state.lock().await.pending_request_id.as_deref()
@@ -682,6 +704,8 @@ fn wire_recording(
                 }
                 state.pending_decision = None;
                 state.recording_started = None;
+                state.recording_bytes = 0;
+                state.recording_byte_limit = 0;
                 (session, request_id, state.recorder.take())
             };
             drop(recorder);
@@ -706,6 +730,9 @@ async fn start_recording(
 ) {
     android::stop_tts();
     let _gate = stream_gate.lock().await;
+    // Start the clock before the audio stream exists: the upload byte cap counts
+    // every captured sample, including audio buffered before `AudioStart`.
+    let started_at = Instant::now();
     let recorder = match audio::Recorder::start() {
         Ok(recorder) => recorder,
         Err(error) => {
@@ -741,10 +768,15 @@ async fn start_recording(
         let _ = session.cancel(request_id).await;
         return;
     }
+    state.recording_byte_limit = u64::from(recorder.sample_rate_hz())
+        * u64::from(recorder.channels())
+        * 2
+        * MAX_RECORDING_SECONDS;
+    state.recording_bytes = 0;
     state.recorder = Some(recorder);
     state.recording_request_id = Some(request_id.clone());
     state.pending_request_id = Some(request_id);
-    state.recording_started = Some(Instant::now());
+    state.recording_started = Some(started_at);
     drop(state);
     app.set_voice_recording(true);
     app.set_ai_response("".into());
@@ -762,7 +794,7 @@ async fn recording_tick(
     let _gate = stream_gate.lock().await;
     let state_handle = state.clone();
     let (session, request_id, pcm, elapsed, should_finish) = {
-        let guard = state.lock().await;
+        let mut guard = state.lock().await;
         let Some(recorder) = guard.recorder.as_ref() else {
             return;
         };
@@ -770,7 +802,7 @@ async fn recording_tick(
             .recording_started
             .map(|started| started.elapsed())
             .unwrap_or_default();
-        let pcm = match recorder.drain_pcm16(MAX_AUDIO_CHUNK_BYTES) {
+        let mut pcm = match recorder.drain_pcm16(MAX_AUDIO_CHUNK_BYTES) {
             Ok(pcm) => pcm,
             Err(error) => {
                 drop(guard);
@@ -778,12 +810,21 @@ async fn recording_tick(
                 return;
             }
         };
+        // Hard byte cap: never hand the actor a chunk that would exceed the
+        // protocol's 60-second recording limit, because that aborts the whole
+        // upload with AUDIO_TOO_LARGE instead of producing a preview.
+        let remaining_bytes = guard
+            .recording_byte_limit
+            .saturating_sub(guard.recording_bytes);
+        let limit_reached =
+            ale_core::remote_session::truncate_pcm_to_limit(&mut pcm, remaining_bytes);
+        guard.recording_bytes += pcm.len() as u64;
         (
             guard.session.clone(),
             guard.recording_request_id.clone(),
             pcm,
             elapsed,
-            elapsed >= Duration::from_secs(MAX_RECORDING_SECONDS),
+            elapsed >= Duration::from_secs(AUTO_STOP_RECORDING_SECONDS) || limit_reached,
         )
     };
     let (Some(session), Some(request_id)) = (session, request_id) else {
@@ -840,10 +881,22 @@ async fn finalize_recording(
             return;
         }
     };
-    for pcm in remaining {
+    for mut pcm in remaining {
         if state.lock().await.pending_request_id.as_deref() != Some(request_id.as_str()) {
             return;
         }
+        let (byte_limit, bytes_sent) = {
+            let guard = state.lock().await;
+            (guard.recording_byte_limit, guard.recording_bytes)
+        };
+        let limit_reached = ale_core::remote_session::truncate_pcm_to_limit(
+            &mut pcm,
+            byte_limit.saturating_sub(bytes_sent),
+        );
+        if pcm.is_empty() {
+            break;
+        }
+        let pcm_len = pcm.len() as u64;
         if let Err(error) = session.send_audio_chunk(request_id.clone(), pcm).await {
             if state.lock().await.pending_request_id.as_deref() != Some(request_id.as_str()) {
                 return;
@@ -855,6 +908,10 @@ async fn finalize_recording(
                 app.set_remote_status(slint::format!("语音发送失败: {}", error.message));
             }
             return;
+        }
+        state.lock().await.recording_bytes += pcm_len;
+        if limit_reached {
+            break;
         }
     }
     if let Some(app) = app_weak.upgrade() {
@@ -925,6 +982,8 @@ async fn abort_recording(
         let request_id = state.recording_request_id.take();
         state.pending_request_id = None;
         state.recording_started = None;
+        state.recording_bytes = 0;
+        state.recording_byte_limit = 0;
         (state.session.clone(), request_id, state.recorder.take())
     };
     drop(recorder);
@@ -975,6 +1034,7 @@ fn finish_confirmation(
                 .respond_to_decision(decision.request_id, decision.decision_id, approved)
                 .await;
             if state.lock().await.session_generation != generation {
+                app.set_is_busy(false);
                 return;
             }
             match result {
@@ -998,6 +1058,10 @@ fn finish_confirmation(
                     if current.session_generation != generation
                         || current.pending_request_id.as_deref() != Some(request_id.as_str())
                     {
+                        drop(current);
+                        // A concurrent cancel already reset the request state;
+                        // still clear the confirmation spinner on this path.
+                        app.set_is_busy(false);
                         return;
                     }
                     current.pending_request_id = None;

@@ -62,6 +62,10 @@ pub fn scan_pairing_info(
         profile.height,
         profile.orientation
     );
+    // Query the display rotation once per scan instead of inside every camera
+    // frame callback (that path did a JNI attach + WindowManager lookup per
+    // frame). A rotation change mid-scan only affects preview orientation.
+    let display_rotation = crate::android::display_rotation().unwrap_or(0);
     let (sender, receiver) = mpsc::sync_channel(1);
     let found = Arc::new(AtomicBool::new(false));
     let decoder = Arc::new(Mutex::new(quircs::Quirc::default()));
@@ -93,8 +97,7 @@ pub fn scan_pairing_info(
                 if width == 0 || height == 0 {
                     return;
                 }
-                let display = crate::android::display_rotation().unwrap_or(0);
-                let rotation = (orientation + 360 - display) % 360;
+                let rotation = (orientation + 360 - display_rotation) % 360;
                 if preview_counter
                     .fetch_add(1, Ordering::Relaxed)
                     .is_multiple_of(6)
@@ -219,6 +222,7 @@ struct CameraSession {
     _window: NativeWindow,
     _reader: ImageReader,
     error: Box<AtomicI32>,
+    ready: Box<AtomicBool>,
 }
 
 impl CameraSession {
@@ -237,6 +241,7 @@ impl CameraSession {
             _window: window,
             _reader: reader,
             error: Box::new(AtomicI32::new(0)),
+            ready: Box::new(AtomicBool::new(false)),
         };
         if camera.manager.is_null() {
             return Err("无法访问 Android 相机服务".to_string());
@@ -281,9 +286,9 @@ impl CameraSession {
         })?;
 
         let session_callbacks = ffi::ACameraCaptureSession_stateCallbacks {
-            context: ptr::null_mut(),
+            context: (&*camera.ready as *const AtomicBool).cast_mut().cast(),
             onClosed: None,
-            onReady: None,
+            onReady: Some(session_ready),
             onActive: None,
         };
         check("启动相机会话", unsafe {
@@ -294,6 +299,20 @@ impl CameraSession {
                 &mut camera.session,
             )
         })?;
+        // Camera2 expects the repeating request to start after `onReady`. Wait
+        // for it under a bounded deadline; if a device never reports ready we
+        // fall back to the previous behaviour instead of failing the scan.
+        let ready_deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while !camera.ready.load(Ordering::Acquire) {
+            if camera.error.load(Ordering::Acquire) != 0 {
+                return Err("相机会话在就绪前断开".to_string());
+            }
+            if std::time::Instant::now() >= ready_deadline {
+                tracing::warn!("Camera session did not report onReady; starting capture");
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
 
         let autofocus =
             ffi::acamera_metadata_enum_acamera_control_af_mode::ACAMERA_CONTROL_AF_MODE_CONTINUOUS_PICTURE
@@ -498,6 +517,17 @@ fn check(action: &str, status: ffi::camera_status_t) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("{action}失败 (Camera2 {})", status.0))
+    }
+}
+
+unsafe extern "C" fn session_ready(
+    context: *mut std::ffi::c_void,
+    _session: *mut ffi::ACameraCaptureSession,
+) {
+    if !context.is_null() {
+        // SAFETY: the context points at `CameraSession::ready`, which outlives
+        // the capture session callbacks.
+        (*context.cast::<AtomicBool>()).store(true, Ordering::Release);
     }
 }
 
